@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f4f2ee">
+<title>eAssist Tuner</title>
+<!--
+  eAssist field tuner — talks to assist_bench_bt.ino over Bluetooth Low Energy.
+  Open in Chrome on Android, served over https (e.g. GitHub Pages).
+  The phone can tune, stop, tare and calibrate. It cannot arm.
+  Every limit lives in the firmware; the slider ranges here just mirror them.
+-->
+<style>
+  :root{
+    --bg:#f4f2ee; --card:#ffffff; --ink:#15171a; --muted:#5d636b; --line:#d9d6cf;
+    --accent:#1f5fbf; --ok:#1d7a3e; --warn:#b26b00; --stop:#c62828; --stopdark:#8e1b1b;
+    --pending:#b26b00;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#111315; --card:#1b1e21; --ink:#f1f1ef; --muted:#9aa1a9; --line:#30353a;
+      --accent:#6aa3ff; --ok:#4cc77a; --warn:#f2a93b; --stop:#e53935; --stopdark:#b71c1c; --pending:#f2a93b; }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+  main{max-width:560px;margin:0 auto;padding:12px 16px 120px}
+  header{display:flex;align-items:center;gap:10px;margin:4px 0 12px}
+  h1{font-size:18px;margin:0;flex:1;letter-spacing:.02em}
+  h1 small{display:block;font-size:12px;font-weight:500;color:var(--muted);letter-spacing:0}
+  button{font:inherit;border:0;border-radius:12px;cursor:pointer;touch-action:manipulation}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .btn{background:var(--accent);color:#fff;padding:10px 16px;font-weight:600}
+  .btn.ghost{background:transparent;color:var(--ink);border:1.5px solid var(--line)}
+  .pill{font-size:13px;font-weight:600;padding:4px 10px;border-radius:999px;border:1.5px solid var(--line);color:var(--muted);white-space:nowrap}
+  .pill.on{color:var(--ok);border-color:var(--ok)}
+  .pill.retry{color:var(--warn);border-color:var(--warn)}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
+  .state{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+  .state .big{flex:1;font-size:22px;font-weight:800;letter-spacing:.06em;padding:10px 14px;border-radius:12px;text-align:center;
+    background:var(--card);border:2px solid var(--line);color:var(--muted)}
+  .state .big.armed{background:var(--ok);border-color:var(--ok);color:#fff}
+  .state .ceil{font-size:13px;font-weight:800;letter-spacing:.06em;padding:12px;border-radius:12px;border:2px solid var(--line);color:var(--muted)}
+  .state .ceil.hit{background:var(--warn);border-color:var(--warn);color:#fff}
+
+  .live{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .live > div{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 10px 8px}
+  .live label{display:block;font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+  .live output{display:block;font-size:30px;font-weight:750;font-variant-numeric:tabular-nums;line-height:1.1;margin-top:2px}
+  .live span{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .meter{height:6px;border-radius:3px;background:var(--line);margin-top:6px;overflow:hidden}
+  .meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+  .stale .live output{color:var(--muted)}
+  .statenote{font-size:15px;font-weight:600;margin:-4px 2px 12px;min-height:20px}
+  .statenote.warn{color:var(--warn)} .statenote.bad{color:var(--stop)}
+  .state .big.fault{background:var(--stop);border-color:var(--stop);color:#fff}
+  .state .big.hand{border-color:var(--warn);color:var(--warn)}
+  .stalenote{display:none;font-size:13px;color:var(--warn);margin:6px 2px 0;font-weight:600}
+  .stale .stalenote{display:block}
+
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:20px 2px 8px}
+  .tune .row{display:flex;align-items:baseline;gap:8px}
+  .tune .name{flex:1;font-weight:650}
+  .tune .name small{display:block;font-weight:400;font-size:13px;color:var(--muted)}
+  .tune .val{font-size:24px;font-weight:750;font-variant-numeric:tabular-nums}
+  .tune .unit{font-size:14px;color:var(--muted)}
+  .tune .pend.on{color:var(--pending)}
+  .tune .pend{font-size:12px;color:var(--muted);font-weight:700;min-height:16px;text-align:right}
+  .ctl{display:flex;align-items:center;gap:10px;margin-top:6px}
+  .ctl button{width:48px;height:48px;font-size:24px;font-weight:700;background:var(--bg);color:var(--ink);border:1.5px solid var(--line)}
+  input[type=range]{flex:1;height:48px;accent-color:var(--accent);margin:0}
+  .range{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:0 58px}
+
+  .tools{display:flex;gap:10px}
+  .tools .btn{flex:1;padding:14px}
+  details summary{cursor:pointer;font-weight:650;padding:2px 0}
+  .cal{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  .cal label{font-size:13px;color:var(--muted)}
+  .cal input{width:100%;font:inherit;font-size:18px;padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink)}
+  .cal .full{grid-column:1/-1}
+  .hint{font-size:13px;color:var(--muted);margin:8px 2px 0}
+
+  #log{font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;max-height:180px;overflow:auto;white-space:pre-wrap;color:var(--muted);margin:0}
+  #log .me{color:var(--accent)}
+
+  .stopbar{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top,var(--bg) 70%,transparent)}
+  #stop{display:block;width:100%;max-width:528px;margin:0 auto;height:72px;font-size:26px;font-weight:900;letter-spacing:.12em;
+    background:var(--stop);color:#fff;box-shadow:0 4px 0 var(--stopdark)}
+  #stop:active{transform:translateY(3px);box-shadow:0 1px 0 var(--stopdark)}
+
+  .nobt{display:none;border-color:var(--warn)}
+  .nobt.show{display:block}
+</style>
+</head>
+<body>
+<main id="app" class="stale">
+  <header>
+    <h1>eAssist tuner<small>phone tunes · the ESC switch arms</small></h1>
+    <span id="pill" class="pill">offline</span>
+    <button id="connect" class="btn">Connect</button>
+  </header>
+
+  <div id="nobt" class="card nobt">
+    <strong>Bluetooth isn't available in this browser.</strong>
+    <div class="hint">Open this page in Chrome on Android, from an https address (GitHub Pages works). Make sure Bluetooth and Location are on.</div>
+  </div>
+
+  <div class="state">
+    <div id="armed" class="big">DISARMED</div>
+    <div id="ceil" class="ceil">CEILING</div>
+  </div>
+  <div class="statenote" id="statenote"></div>
+
+  <div class="live">
+    <div><label>Force</label><output id="f">—</output><span>N</span></div>
+    <div><label>Current</label><output id="i">—</output><span id="iof">A</span><div class="meter"><i id="imeter"></i></div></div>
+    <div><label>Speed</label><output id="v">—</output><span id="erpm">km/h</span></div>
+  </div>
+  <div class="stalenote" id="stalenote">No live data — readings are old.</div>
+
+  <h2>Tuning</h2>
+  <div id="tunables"></div>
+
+  <h2>Load cell</h2>
+  <div class="card">
+    <div class="tools">
+      <button id="tare" class="btn ghost">Tare</button>
+    </div>
+    <div class="hint" id="tarehint">Hands off the bar. Takes 2 s. Refused while armed.</div>
+  </div>
+  <div class="card">
+    <details id="caldetails">
+      <summary>Calibration <span id="calstate" class="unit"></span></summary>
+      <div class="cal">
+        <div><label for="slope">Slope (counts/N)</label><input id="slope" inputmode="decimal"></div>
+        <div><label for="inter">Intercept (counts)</label><input id="inter" inputmode="decimal"></div>
+        <button id="calsave" class="btn full">Save to flash</button>
+      </div>
+      <div class="hint">Writes to the ESP32's flash and survives a reboot. Refused while armed. Re-tare afterwards.</div>
+    </details>
+  </div>
+
+  <h2>Messages</h2>
+  <div class="card"><pre id="log"></pre></div>
+</main>
+
+<div class="stopbar"><button id="stop" disabled>STOP</button></div>
+
+<script>
+(() => {
+  const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // we write here
+  const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // chair notifies here
+  const ERPM_PER_KMH = 482;                             // same as the firmware
+
+  const $ = id => document.getElementById(id);
+  const enc = new TextEncoder(), dec = new TextDecoder();
+
+  // Hard limits arrive from the firmware in the L line. These are only
+  // placeholders until then; the firmware clamps regardless.
+  const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0 };
+  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null };
+  let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
+
+  // ---------------------------------------------------------------- tunables
+  const defs = [
+    { key:'k', name:'Gain',        sub:'amps per newton over deadband', unit:'A/N', step:0.01, dp:2,
+      min:()=>0.01, max:()=>limits.kMax },
+    { key:'m', name:'Max current', sub:'ceiling on the command',          unit:'A',   step:0.1,  dp:1,
+      min:()=>0.1,  max:()=>limits.iCap },
+    { key:'e', name:'Speed ceiling', sub:'assist cuts out above this',    unit:'km/h', step:50,  dp:0,
+      min:()=>200,  max:()=>limits.eMax, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm` },
+    { key:'b', name:'Deadband',    sub:'force ignored before assist starts', unit:'N', step:0.5,  dp:1,
+      min:()=>limits.bMin, max:()=>20 },
+  ];
+  const ui = {};
+  const host = $('tunables');
+  for (const d of defs) {
+    const el = document.createElement('div');
+    el.className = 'card tune';
+    el.innerHTML = `
+      <div class="row">
+        <div class="name">${d.name}<small>${d.sub}</small></div>
+        <div><span class="val">—</span> <span class="unit">${d.unit}</span></div>
+      </div>
+      <div class="pend"></div>
+      <div class="ctl">
+        <button aria-label="less">−</button>
+        <input type="range">
+        <button aria-label="more">+</button>
+      </div>
+      <div class="range"><span class="lo"></span><span class="hi"></span></div>`;
+    host.appendChild(el);
+    const [minus, plus] = el.querySelectorAll('.ctl button');
+    const r = el.querySelector('input');
+    const u = ui[d.key] = { d, el, r, minus, plus, val: el.querySelector('.val'),
+                            pend: el.querySelector('.pend'), lo: el.querySelector('.lo'), hi: el.querySelector('.hi'),
+                            pending: null, timer: null };
+    r.addEventListener('input', () => showPending(u, +r.value));
+    r.addEventListener('change', () => queueSet(u, +r.value, 250));
+    minus.addEventListener('click', () => nudge(u, -1));
+    plus .addEventListener('click', () => nudge(u, +1));
+  }
+  function fmt(d, v){ return d.show ? d.show(v) : (+v).toFixed(d.dp); }
+  function applyRanges(){
+    for (const u of Object.values(ui)) {
+      u.r.min = u.d.min(); u.r.max = u.d.max(); u.r.step = u.d.step;
+      u.lo.textContent = fmt(u.d, u.d.min()); u.hi.textContent = fmt(u.d, u.d.max());
+    }
+  }
+  function showPending(u, v){
+    u.pending = v;
+    u.pend.classList.add('on');
+    u.pend.textContent = `→ ${fmt(u.d, v)} ${u.d.unit}${u.d.extra ? ' · ' + u.d.extra(v) : ''} · sending…`;
+  }
+  function nudge(u, dir){
+    const base = u.pending ?? P[u.d.key];
+    if (base == null) return;
+    let v = Math.round((base + dir * u.d.step) / u.d.step) * u.d.step;
+    v = Math.min(u.d.max(), Math.max(u.d.min(), +v.toFixed(4)));
+    u.r.value = v; queueSet(u, v, 350);    // short wait so repeated taps send once
+  }
+  function queueSet(u, v, wait){
+    showPending(u, v);
+    clearTimeout(u.timer);
+    u.timer = setTimeout(() => send(`${u.d.key} ${(+v).toFixed(u.d.key==='e'?0:3)}`), wait);
+  }
+  // The firmware's echo (P line) is the only truth shown as the value.
+  function renderParams(){
+    for (const u of Object.values(ui)) {
+      const v = P[u.d.key];
+      if (v == null) continue;
+      u.val.textContent = fmt(u.d, v);
+      if (u.pending != null && Math.abs(u.pending - v) < u.d.step / 2) { u.pending = null; }
+      if (u.pending == null) { u.pend.classList.remove('on'); u.r.value = v; u.pend.textContent = u.d.extra ? u.d.extra(v) : ''; }
+    }
+    $('calstate').textContent = P.cal ? `· ${P.slope.toFixed(2)} counts/N` : '· NOT CALIBRATED';
+    if (document.activeElement !== $('slope')) $('slope').value = P.slope ?? '';
+    if (document.activeElement !== $('inter')) $('inter').value = P.inter ?? '';
+  }
+
+  // ---------------------------------------------------------------- live
+  // Chair states, from the last field of the T line (assist_chair.ino).
+  const STATES = {
+    F: { big:'FAULT',      cls:'fault', tone:'bad',  note:'Will not arm: no calibration, or the load cell is not answering. Fix, then cycle power.' },
+    W: { big:'WAITING',    cls:'',      tone:'',     note:'Waiting for the ESC to answer. Is its switch on?' },
+    Z: { big:'TARING',     cls:'',      tone:'',     note:'Taring — hands off the bar.' },
+    H: { big:'LET GO',     cls:'hand',  tone:'warn', note:'Not armed: the bar is loaded or moving. Let go — it retries every 2 s. If the mount changed, tap Tare.' },
+    A: { big:'ARMED',      cls:'armed', tone:'',     note:'' },
+    S: { big:'STOPPED',    cls:'',      tone:'warn', note:'Stopped. Cycle the ESC switch to re-arm — the phone cannot.' },
+  };
+  function renderTele(t){
+    armed = t.armed;
+    const S = STATES[t.state] || (armed ? STATES.A : { big:'DISARMED', note:'' });
+    const a = $('armed'); a.textContent = S.big;
+    a.className = 'big ' + (S.cls || '');
+    const n = $('statenote'); n.textContent = S.note; n.className = 'statenote ' + (S.tone || '');
+    $('ceil').classList.toggle('hit', t.ceil);
+    $('f').textContent = t.F.toFixed(1);
+    $('i').textContent = t.I.toFixed(2);
+    const iMax = P.m || limits.iCap;
+    $('iof').textContent = `A of ${iMax.toFixed(1)}`;
+    $('imeter').style.width = Math.min(100, 100 * t.I / iMax) + '%';
+    $('v').textContent = (t.erpm / ERPM_PER_KMH).toFixed(1);
+    $('erpm').textContent = `km/h · ${t.erpm} erpm`;
+    $('tare').disabled = armed || !rxChar;
+    $('calsave').disabled = armed || !rxChar;
+    $('tarehint').textContent = armed ? 'Disarm at the chair to tare.' : 'Hands off the bar. Takes 2 s. Refused while armed.';
+  }
+  setInterval(() => $('app').classList.toggle('stale', !rxChar || Date.now() - lastT > 1000), 250);
+
+  // ---------------------------------------------------------------- lines in
+  let inbuf = '';
+  function onNotify(e){
+    inbuf += dec.decode(e.target.value, { stream: true });
+    let nl;
+    while ((nl = inbuf.indexOf('\n')) >= 0) {
+      const line = inbuf.slice(0, nl).trim(); inbuf = inbuf.slice(nl + 1);
+      if (line) handleLine(line);
+    }
+    if (inbuf.length > 2000) inbuf = '';
+  }
+  function handleLine(line){
+    const p = line.split(/\s+/);
+    if (p[0] === 'T' && p.length >= 6) {
+      lastT = Date.now();
+      renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6] });
+    } else if (p[0] === 'P' && p.length >= 8) {
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7] });
+      renderParams();
+    } else if (p[0] === 'L' && p.length >= 5) {
+      Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
+      applyRanges(); renderParams();
+    } else if (line.startsWith('#')) {
+      log(line.slice(1).trim());
+    }
+  }
+
+  // ---------------------------------------------------------------- lines out
+  // GATT allows one operation at a time, so writes go through a chain.
+  let chain = Promise.resolve();
+  function send(cmd){
+    if (!rxChar) { log('not connected — "' + cmd + '" not sent'); return Promise.resolve(); }
+    log('› ' + cmd, true);
+    const ch = rxChar;
+    chain = chain.then(() => ch.writeValue(enc.encode(cmd + '\n')))
+                 .catch(err => log('send failed: ' + err.message));
+    return chain;
+  }
+
+  // ---------------------------------------------------------------- connection
+  function setPill(text, cls){ const p = $('pill'); p.textContent = text; p.className = 'pill ' + (cls || ''); }
+  function setConnected(on){
+    $('stop').disabled = !on;
+    $('connect').textContent = on ? 'Disconnect' : 'Connect';
+    $('tare').disabled = !on || armed;
+    $('calsave').disabled = !on || armed;
+    for (const u of Object.values(ui)) { u.r.disabled = u.minus.disabled = u.plus.disabled = !on; }
+  }
+
+  async function attach(){
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    const tx = await svc.getCharacteristic(TX);
+    rxChar = await svc.getCharacteristic(RX);
+    tx.addEventListener('characteristicvaluechanged', onNotify);
+    await tx.startNotifications();
+    chain = Promise.resolve(); inbuf = '';
+    setPill('connected', 'on'); setConnected(true);
+    send('p');
+  }
+
+  async function connect(){
+    if (!navigator.bluetooth) { $('nobt').classList.add('show'); return; }
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS] }, { namePrefix: 'eAssist' }],
+        optionalServices: [NUS],
+      });
+      device.addEventListener('gattserverdisconnected', onDrop);
+      userClosed = false;
+      setPill('connecting…', 'retry');
+      await attach();
+    } catch (err) {
+      if (err.name !== 'NotFoundError') log('connect failed: ' + err.message);   // NotFound = user cancelled
+      setPill('offline');
+    }
+  }
+
+  function onDrop(){
+    rxChar = null; setConnected(false);
+    if (userClosed) { setPill('offline'); return; }
+    log('link lost — chair keeps its settings. retrying…');
+    setPill('reconnecting…', 'retry');
+    const retry = async (n) => {
+      if (userClosed || !device) return;
+      try { await attach(); log('reconnected'); }
+      catch { retryTimer = setTimeout(() => retry(n + 1), Math.min(5000, 1000 + n * 500)); }
+    };
+    retry(0);
+  }
+
+  $('connect').addEventListener('click', () => {
+    if (device && device.gatt.connected) { userClosed = true; clearTimeout(retryTimer); device.gatt.disconnect(); }
+    else if (device && !userClosed && retryTimer) { userClosed = true; clearTimeout(retryTimer); setPill('offline'); }
+    else connect();
+  });
+
+  // ---------------------------------------------------------------- buttons
+  $('stop').addEventListener('click', () => { if (navigator.vibrate) navigator.vibrate(60); send('x'); });
+  $('tare').addEventListener('click', () => send('t'));
+  let calArmed = 0;
+  $('calsave').addEventListener('click', () => {
+    const s = parseFloat($('slope').value), i = parseFloat($('inter').value);
+    if (!isFinite(s) || s === 0 || !isFinite(i)) { log('calibration needs a non-zero slope and an intercept'); return; }
+    if (Date.now() - calArmed > 4000) {          // two taps: first asks, second writes
+      calArmed = Date.now(); $('calsave').textContent = 'Tap again to write flash';
+      setTimeout(() => { $('calsave').textContent = 'Save to flash'; }, 4000);
+      return;
+    }
+    calArmed = 0; $('calsave').textContent = 'Save to flash';
+    send(`c ${s} ${i}`);
+  });
+
+  // ---------------------------------------------------------------- log
+  function log(msg, mine){
+    const el = $('log');
+    const line = document.createElement('div');
+    if (mine) line.className = 'me';
+    line.textContent = new Date().toTimeString().slice(0, 8) + '  ' + msg;
+    el.prepend(line);
+    while (el.childNodes.length > 60) el.lastChild.remove();
+  }
+
+  // ---------------------------------------------------------------- start
+  applyRanges(); setConnected(false);
+  if (!navigator.bluetooth) $('nobt').classList.add('show');
+  window.__eassist = { handleLine };   // for testing without a chair
+})();
+</script>
+</body>
+</html>
