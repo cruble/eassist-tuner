@@ -1,7 +1,7 @@
 /*
   assist_bench_bt.ino  —  assist_bench, plus a phone that can tune it
   ESP32-WROOM-32  +  HX711 + bar load cell  <->  Flipsky Mini V6 MK5 (sensored)
-                  +  Bluetooth Low Energy to a phone (field_tuner.html)
+                  +  Bluetooth Low Energy to a phone (field_tuner/index.html)
 
   WHAT CHANGED FROM assist_bench
   The control law is untouched. Same deadband, gain, rate limit, ceiling,

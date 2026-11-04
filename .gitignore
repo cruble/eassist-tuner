@@ -1,0 +1,8 @@
+# macOS Finder clutter
+.DS_Store
+**/.DS_Store
+
+# Arduino build output
+build/
+*.bin
+*.elf

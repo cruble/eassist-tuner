@@ -1,7 +1,7 @@
 /*
   assist_chair.ino  —  standalone: switch on, push, tune from the phone if needed
   ESP32-WROOM-32  +  HX711 + bar load cell  <->  Flipsky Mini V6 MK5 (sensored)
-                  +  Bluetooth Low Energy to a phone (field_tuner.html)
+                  +  Bluetooth Low Energy to a phone (field_tuner/index.html)
 
   Same control law as assist_bench / assist_bench_bt. What is new: the chair
   arms itself. No laptop anywhere in the sequence.
