@@ -128,7 +128,7 @@
     <div class="tools">
       <button id="tare" class="btn ghost">Tare</button>
     </div>
-    <div class="hint" id="tarehint">Hands off the bar. Takes 2 s. Refused while armed.</div>
+    <div class="hint" id="tarehint">Hands off the bar. Takes 2 s. Usually not needed — the chair tares itself at every switch-on.</div>
   </div>
   <div class="card">
     <details id="caldetails">
@@ -138,7 +138,7 @@
         <div><label for="inter">Intercept (counts)</label><input id="inter" inputmode="decimal"></div>
         <button id="calsave" class="btn full">Save to flash</button>
       </div>
-      <div class="hint">Writes to the ESP32's flash and survives a reboot. Refused while armed. Re-tare afterwards.</div>
+      <div class="hint">Writes to the ESP32's flash and survives a reboot. Refused while armed. The chair takes a fresh zero by itself the next time the ESC is switched on.</div>
     </details>
   </div>
 
@@ -267,7 +267,7 @@
     $('erpm').textContent = `km/h · ${t.erpm} erpm`;
     $('tare').disabled = armed || !rxChar;
     $('calsave').disabled = armed || !rxChar;
-    $('tarehint').textContent = armed ? 'Disarm at the chair to tare.' : 'Hands off the bar. Takes 2 s. Refused while armed.';
+    $('tarehint').textContent = armed ? 'Armed — tap STOP first to tare. Usually not needed: the chair tares itself at every switch-on.' : 'Hands off the bar. Takes 2 s. Usually not needed — the chair tares itself at every switch-on.';
   }
   setInterval(() => $('app').classList.toggle('stale', !rxChar || Date.now() - lastT > 1000), 250);
 
