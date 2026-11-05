@@ -243,13 +243,44 @@
       if (u.pending != null && Math.abs(u.pending - v) < u.d.step / 2) { u.pending = null; }
       if (u.pending == null) { u.pend.classList.remove('on'); u.r.value = v; u.pend.textContent = u.d.extra ? u.d.extra(v) : ''; }
     }
-    $('save').closest('.card').classList.toggle('dirty', P.unsaved);
-    $('savehint').textContent = P.unsaved
-      ? 'Unsaved — these settings are lost when the ESP32 loses power.'
-      : 'Saved. The chair starts with these settings.';
+    renderSave();
     $('calstate').textContent = P.cal ? `· ${P.slope.toFixed(2)} counts/N` : '· NOT CALIBRATED';
     if (document.activeElement !== $('slope')) $('slope').value = P.slope ?? '';
     if (document.activeElement !== $('inter')) $('inter').value = P.inter ?? '';
+  }
+
+  // ---------------------------------------------------------------- save
+  // The firmware says whether live settings differ from saved ones (last field
+  // of P). Old firmware does not send it, and cannot save at all.
+  let savedVals = null, savedAt = null;
+  const fmtSet = v => `gain ${v.k.toFixed(2)} · max ${v.m.toFixed(1)} A · ceiling ${(v.e/ERPM_PER_KMH).toFixed(1)} km/h · deadband ${v.b.toFixed(1)} N`;
+  function renderSave(){
+    const btn = $('save'), hint = $('savehint'), card = btn.closest('.card');
+    if (P.k == null) return;
+    if (!P.canSave) {
+      card.classList.add('dirty'); btn.disabled = true; btn.textContent = 'Save not available';
+      hint.textContent = 'This firmware cannot save. Reflash assist_chair with the Save version.';
+      return;
+    }
+    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b };
+    card.classList.toggle('dirty', P.unsaved);
+    btn.disabled = !rxChar || !P.unsaved;
+    if (P.unsaved) {
+      btn.textContent = 'Save as switch-on settings';
+      let what = '';
+      if (savedVals) {
+        const ch = [];
+        if (Math.abs(P.k - savedVals.k) > 1e-4) ch.push(`gain ${savedVals.k.toFixed(2)} → ${P.k.toFixed(2)}`);
+        if (Math.abs(P.m - savedVals.m) > 1e-4) ch.push(`max ${savedVals.m.toFixed(1)} → ${P.m.toFixed(1)} A`);
+        if (Math.abs(P.e - savedVals.e) > 0.5)  ch.push(`ceiling ${(savedVals.e/ERPM_PER_KMH).toFixed(1)} → ${(P.e/ERPM_PER_KMH).toFixed(1)} km/h`);
+        if (Math.abs(P.b - savedVals.b) > 1e-3) ch.push(`deadband ${savedVals.b.toFixed(1)} → ${P.b.toFixed(1)} N`);
+        what = ch.join(' · ');
+      }
+      hint.textContent = 'Unsaved — lost if the ESP32 loses power.' + (what ? ' Changed: ' + what : '');
+    } else {
+      btn.textContent = 'Nothing to save';
+      hint.textContent = (savedAt ? `Saved ${savedAt}. ` : 'Saved. ') + 'Switch-on settings: ' + fmtSet(P);
+    }
   }
 
   // ---------------------------------------------------------------- live
@@ -299,13 +330,15 @@
       lastT = Date.now();
       renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6] });
     } else if (p[0] === 'P' && p.length >= 8) {
-      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1' });
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9 });
       renderParams();
     } else if (p[0] === 'L' && p.length >= 5) {
       Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
       applyRanges(); renderParams();
     } else if (line.startsWith('#')) {
-      log(line.slice(1).trim());
+      const msg = line.slice(1).trim();
+      if (msg.startsWith('saved:')) { savedAt = new Date().toTimeString().slice(0, 5); }
+      log(msg);
     }
   }
 
@@ -328,7 +361,7 @@
     $('connect').textContent = on ? 'Disconnect' : 'Connect';
     $('tare').disabled = !on || armed;
     $('calsave').disabled = !on || armed;
-    $('save').disabled = !on;
+    renderSave(); if (!on) $('save').disabled = true;
     for (const u of Object.values(ui)) { u.r.disabled = u.minus.disabled = u.plus.disabled = !on; }
   }
 
@@ -383,7 +416,7 @@
   // ---------------------------------------------------------------- buttons
   $('stop').addEventListener('click', () => { if (navigator.vibrate) navigator.vibrate(60); send('x'); });
   $('tare').addEventListener('click', () => send('t'));
-  $('save').addEventListener('click', () => send('w'));
+  $('save').addEventListener('click', () => { $('save').disabled = true; $('save').textContent = 'Saving…'; send('w'); });
   let calArmed = 0;
   $('calsave').addEventListener('click', () => {
     const s = parseFloat($('slope').value), i = parseFloat($('inter').value);

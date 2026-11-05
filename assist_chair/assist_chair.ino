@@ -1,7 +1,7 @@
 /*
   assist_chair.ino  —  standalone: switch on, push, tune from the phone if needed
   ESP32-WROOM-32  +  HX711 + bar load cell  <->  Flipsky Mini V6 MK5 (sensored)
-                  +  Bluetooth Low Energy to a phone (field_tuner.html)
+                  +  Bluetooth Low Energy to a phone (field_tuner/index.html)
 
   Same control law as assist_bench / assist_bench_bt. What is new: the chair
   arms itself. No laptop anywhere in the sequence.
@@ -58,12 +58,13 @@
     t           tare now and accept it as the new zero        (disarmed only)
                 -- the way out when the mount changed and auto-tare keeps refusing
     d           toggle the USB live stream  USB only
+    w           save k m e b to flash -- the values it starts with next time
     p           report parameters
     h           help
 
   PHONE PROTOCOL  (text lines, '\n' terminated, sent in 20-byte notifications)
     L <iCap> <kMax> <eMax> <bMin>                        hard limits
-    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter>     parameters
+    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1>   parameters
     T <armed> <F N> <I A> <erpm> <ceiling> <state>       telemetry, 5 Hz
         state: F fault  W waiting for ESC  Z taring  H hand on bar
                A armed  S stopped (cycle power)
@@ -110,10 +111,15 @@ const float TARE_MATCH_N     = 5.0f;  // max distance from the last good zero
 const unsigned long TARE_RETRY_MS = 2000;
 
 // ---------------- tunables ----------------
-float gainAperN   = 0.10f;
-float iMax        = 1.5f;
-float erpmCeiling = 2000.0f;          // 4.1 km/h on this wheel
-float deadbandN   = 4.0f;
+// Defaults, used until something is saved with 'w'. Saved values are loaded
+// at boot (and re-clamped, in case the hard limits above have since changed).
+const float DEF_GAIN = 0.10f, DEF_IMAX = 1.5f, DEF_ERPM = 2000.0f, DEF_DEADBAND = 4.0f;
+float gainAperN   = DEF_GAIN;
+float iMax        = DEF_IMAX;
+float erpmCeiling = DEF_ERPM;         // 4.1 km/h on this wheel
+float deadbandN   = DEF_DEADBAND;
+float savedK = DEF_GAIN, savedM = DEF_IMAX, savedE = DEF_ERPM, savedB = DEF_DEADBAND;
+
 
 // ---------------- state ----------------
 enum ChairState { ST_FAULT, ST_WAIT_ESC, ST_TARING, ST_HAND_ON_BAR, ST_ARMED, ST_STOPPED };
@@ -240,10 +246,16 @@ void sendLimits() {
   bleQueue(b, strlen(b));
 }
 
+bool unsavedTune() {
+  return fabs(gainAperN - savedK) > 1e-4f || fabs(iMax - savedM) > 1e-4f ||
+         fabs(erpmCeiling - savedE) > 0.5f || fabs(deadbandN - savedB) > 1e-3f;
+}
+
 void sendParams() {
   char b[96];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f\n",
-           gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept);
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d\n",
+           gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
+           unsavedTune() ? 1 : 0);
   bleQueue(b, strlen(b));
 }
 
@@ -430,7 +442,7 @@ void allStop(const char *why) {
 void help() {
   Serial.println("# a arm | x STOP | t tare | d stream | p params | h help");
   Serial.println("# c <slope> <intercept>  set calibration directly");
-  Serial.println("# k <A/N> gain | m <A> max | e <erpm> ceiling | b <N> deadband");
+  Serial.println("# k <A/N> gain | m <A> max | e <erpm> ceiling | b <N> deadband | w save");
   Serial.print("# gain "); Serial.print(gainAperN, 3);
   Serial.print("  max "); Serial.print(iMax, 2);
   Serial.print(" A  ceiling "); Serial.print(erpmCeiling, 0);
@@ -519,8 +531,21 @@ void handleLine(String line, Source src) {
     return;
   }
 
+  if (c == 'w') {
+    prefs.begin("tune", false);
+    prefs.putFloat("k", gainAperN); prefs.putFloat("m", iMax);
+    prefs.putFloat("e", erpmCeiling); prefs.putFloat("b", deadbandN);
+    prefs.putBool("valid", true);
+    prefs.end();
+    savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
+    say("saved: gain " + String(gainAperN, 3) + "  max " + String(iMax, 2) + " A  ceiling "
+        + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N. these load at switch-on.");
+    sendParams();
+    return;
+  }
+
   if (c == 'p') { sendParams(); if (!phone) help(); return; }
-  if (c == 'h') { help(); if (phone) say("phone: k m e b x t c p. arming is the ESC switch."); return; }
+  if (c == 'h') { help(); if (phone) say("phone: k m e b w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");
 }
@@ -551,6 +576,19 @@ void setup() {
   calValid       = prefs.getBool("valid", false);
   savedZero      = prefs.getLong("zero", 0);
   savedZeroValid = prefs.getBool("zvalid", false);
+  prefs.end();
+
+  prefs.begin("tune", true);
+  if (prefs.getBool("valid", false)) {
+    gainAperN   = bounded("saved gain",     prefs.getFloat("k", DEF_GAIN),     0.01f, GAIN_HARD_MAX);
+    iMax        = bounded("saved max amps", prefs.getFloat("m", DEF_IMAX),     0.10f, I_HARD_CAP);
+    erpmCeiling = bounded("saved ceiling",  prefs.getFloat("e", DEF_ERPM),     200.0f, ERPM_HARD_MAX);
+    deadbandN   = bounded("saved deadband", prefs.getFloat("b", DEF_DEADBAND), DEADBAND_MIN, 20.0f);
+    savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
+    Serial.println("# loaded saved tuning from flash.");
+  } else {
+    Serial.println("# no saved tuning -- using defaults.");
+  }
   prefs.end();
 
   state = ST_WAIT_ESC;
