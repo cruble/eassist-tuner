@@ -1,7 +1,7 @@
 /*
   assist_chair.ino  —  standalone: switch on, push, tune from the phone if needed
   ESP32-WROOM-32  +  HX711 + bar load cell  <->  Flipsky Mini V6 MK5 (sensored)
-                  +  Bluetooth Low Energy to a phone (field_tuner/index.html)
+                  +  Bluetooth Low Energy to a phone (field_tuner.html)
 
   Same control law as assist_bench / assist_bench_bt. What is new: the chair
   arms itself. No laptop anywhere in the sequence.
@@ -9,8 +9,8 @@
   --------------------------------------------------------------------------
   HOW THE CHAIR TURNS ON  (the ESC power switch is the arm switch)
 
+    0. Power bank on. The ESP32 boots and waits for the ESC.  LED: slow blink
     1. Hands OFF the bar. Flip the ESC power switch.
-       The ESC powers the ESP32 too, so this one switch starts everything.
     2. ESP32 waits until the ESC answers on UART.          LED: slow blink
     3. Two-second tare, hands off.                          LED: slow blink
          - The bar must be still, and the new zero must be close to the
@@ -22,21 +22,19 @@
     The only ways back are the switch (power-cycle the ESC) or 'a' on USB.
     The phone can never arm.
 
-    If the ESC stops answering for 1 s, the chair disarms and goes back to
-    step 2. (Only matters on the bench, with the ESP32 on USB power.)
+    ESC switch OFF = disarmed within 1 s (the ESP32 notices the ESC went
+    quiet). ON again = back to step 2: tare, then arm. So with the ESP32 on
+    its own power bank, the ESC switch is still the one arm/disarm switch.
 
     LED fast blink = FAULT: no calibration in flash, or HX711 not answering.
     It will not arm. Fix and power-cycle.
 
-  The abort is still the ESC switch / XT90. Turning it off kills both the
-  motor and the ESP32 -- that is the point of powering one from the other.
+  The abort is still the ESC switch / XT90.
   --------------------------------------------------------------------------
-  POWER  (changed from the harness sheet)
-    ESC COMM 5 V  -> Schottky diode (1N5817, stripe toward ESP32) -> ESP32 VIN/5V
-    ESC COMM GND  -> ESP32 GND   (already there: pin 6, white)
-    Meter COMM 7 and 8 before connecting -- one is 3.3 V, one is 5 V. Use 5 V.
-    The diode stops the ESC 5 V from backfeeding a laptop when USB is in, so
-    USB and ESC power can be connected at the same time.
+  POWER  (as on the harness sheet -- unchanged)
+    ESP32 on its own USB power bank. COMM 7 and 8 stay empty.
+    Optional later: feed the ESP32 from the ESC's 5 V through a Schottky
+    diode so one switch powers everything. Not needed for this firmware.
 
   WIRING
     HX711   VCC->3V3   GND->GND   DT->D18   SCK->D19

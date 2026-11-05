@@ -72,6 +72,9 @@
   input[type=range]{flex:1;height:48px;accent-color:var(--accent);margin:0}
   .range{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:0 58px}
 
+  .savecard .btn{width:100%;padding:14px}
+  .savecard.dirty{border-color:var(--pending)}
+  .savecard.dirty #savehint{color:var(--pending);font-weight:600}
   .tools{display:flex;gap:10px}
   .tools .btn{flex:1;padding:14px}
   details summary{cursor:pointer;font-weight:650;padding:2px 0}
@@ -122,6 +125,10 @@
 
   <h2>Tuning</h2>
   <div id="tunables"></div>
+  <div class="card savecard">
+    <button id="save" class="btn">Save as switch-on settings</button>
+    <div class="hint" id="savehint">Changes work immediately. Save makes them the settings the chair starts with.</div>
+  </div>
 
   <h2>Load cell</h2>
   <div class="card">
@@ -161,7 +168,7 @@
   // Hard limits arrive from the firmware in the L line. These are only
   // placeholders until then; the firmware clamps regardless.
   const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0 };
-  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null };
+  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false };
   let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
 
   // ---------------------------------------------------------------- tunables
@@ -236,6 +243,10 @@
       if (u.pending != null && Math.abs(u.pending - v) < u.d.step / 2) { u.pending = null; }
       if (u.pending == null) { u.pend.classList.remove('on'); u.r.value = v; u.pend.textContent = u.d.extra ? u.d.extra(v) : ''; }
     }
+    $('save').closest('.card').classList.toggle('dirty', P.unsaved);
+    $('savehint').textContent = P.unsaved
+      ? 'Unsaved — these settings are lost when the ESP32 loses power.'
+      : 'Saved. The chair starts with these settings.';
     $('calstate').textContent = P.cal ? `· ${P.slope.toFixed(2)} counts/N` : '· NOT CALIBRATED';
     if (document.activeElement !== $('slope')) $('slope').value = P.slope ?? '';
     if (document.activeElement !== $('inter')) $('inter').value = P.inter ?? '';
@@ -288,7 +299,7 @@
       lastT = Date.now();
       renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6] });
     } else if (p[0] === 'P' && p.length >= 8) {
-      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7] });
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1' });
       renderParams();
     } else if (p[0] === 'L' && p.length >= 5) {
       Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
@@ -317,6 +328,7 @@
     $('connect').textContent = on ? 'Disconnect' : 'Connect';
     $('tare').disabled = !on || armed;
     $('calsave').disabled = !on || armed;
+    $('save').disabled = !on;
     for (const u of Object.values(ui)) { u.r.disabled = u.minus.disabled = u.plus.disabled = !on; }
   }
 
@@ -371,6 +383,7 @@
   // ---------------------------------------------------------------- buttons
   $('stop').addEventListener('click', () => { if (navigator.vibrate) navigator.vibrate(60); send('x'); });
   $('tare').addEventListener('click', () => send('t'));
+  $('save').addEventListener('click', () => send('w'));
   let calArmed = 0;
   $('calsave').addEventListener('click', () => {
     const s = parseFloat($('slope').value), i = parseFloat($('inter').value);
