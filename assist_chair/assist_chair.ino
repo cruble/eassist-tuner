@@ -3,8 +3,17 @@
   ESP32-WROOM-32  +  HX711 + bar load cell  <->  Flipsky Mini V6 MK5 (sensored)
                   +  Bluetooth Low Energy to a phone (field_tuner/index.html)
 
-  Same control law as assist_bench / assist_bench_bt. What is new: the chair
-  arms itself. No laptop anywhere in the sequence.
+  Same push law as assist_bench / assist_bench_bt. The chair arms itself --
+  no laptop anywhere in the sequence -- and (11/05) it can REVERSE:
+
+                       push                pull
+    rolling forward    assist              nothing (brake: later)
+    at rest            assist              reverse, capped
+    rolling backward   nothing (later)     reverse, capped
+
+  'At rest' is |v| <= 0.15 m/s, the band from the control grid. Pull uses the
+  same gain and deadband as push, mirrored. Reverse has its own current cap
+  and speed ceiling, both lower. Reverse max = 0 turns reverse off.
 
   --------------------------------------------------------------------------
   HOW THE CHAIR TURNS ON  (the ESC power switch is the arm switch)
@@ -54,17 +63,19 @@
     m <A>       max current                (default 1.5, hard cap 3.0)
     e <erpm>    speed ceiling              (default 2000 = 4.1 km/h)
     b <N>       deadband in newtons        (default 4.0)
+    r <A>       reverse max current        (default 0.8, hard cap 1.5, 0 = off)
+    v <erpm>    reverse speed ceiling      (default 600 = 1.2 km/h, max 1000)
     c <s> <i>   calibration slope/intercept, saved to flash   (disarmed only)
     t           tare now and accept it as the new zero        (disarmed only)
                 -- the way out when the mount changed and auto-tare keeps refusing
     d           toggle the USB live stream  USB only
-    w           save k m e b to flash -- the values it starts with next time
+    w           save k m e b r v to flash -- the values it starts with next time
     p           report parameters
     h           help
 
   PHONE PROTOCOL  (text lines, '\n' terminated, sent in 20-byte notifications)
-    L <iCap> <kMax> <eMax> <bMin>                        hard limits
-    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1>   parameters
+    L <iCap> <kMax> <eMax> <bMin> <rCap> <vMax>          hard limits
+    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v>   parameters
     T <armed> <F N> <I A> <erpm> <ceiling> <state>       telemetry, 5 Hz
         state: F fault  W waiting for ESC  Z taring  H hand on bar
                A armed  S stopped (cycle power)
@@ -99,6 +110,12 @@ const float I_HARD_CAP    = 3.0f;     // A. nothing may exceed this, ever
 const float GAIN_HARD_MAX = 0.50f;    // A/N. 6 N over deadband already hits 3 A
 const float ERPM_HARD_MAX = 2900.0f;  // ~6.0 km/h, top of the planned taper
 const float DEADBAND_MIN  = 2.0f;     // N. a resting hand must not drive
+const float I_REV_HARD_CAP    = 1.5f;    // A. reverse is always gentler than forward
+const float ERPM_REV_HARD_MAX = 1000.0f; // ~2.1 km/h backwards, at most
+const float REST_ERPM         = 260.0f;  // 0.15 m/s = 0.54 km/h x 482 erpm per km/h
+// If the speed reads NEGATIVE while the wheel turns forward, set this to -1.
+// Everything about direction depends on it. Check it before trusting reverse.
+const int   ERPM_SIGN         = 1;
 const float RAMP_A_PER_S  = 4.0f;     // how fast current may change
 const unsigned long SEND_MS = 20;     // 50 Hz, well inside the ESC's 1 s timeout
 const unsigned long POLL_MS = 200;    // how often we ask for speed
@@ -114,11 +131,15 @@ const unsigned long TARE_RETRY_MS = 2000;
 // Defaults, used until something is saved with 'w'. Saved values are loaded
 // at boot (and re-clamped, in case the hard limits above have since changed).
 const float DEF_GAIN = 0.10f, DEF_IMAX = 1.5f, DEF_ERPM = 2000.0f, DEF_DEADBAND = 4.0f;
+const float DEF_IREV = 0.8f, DEF_EREV = 600.0f;
 float gainAperN   = DEF_GAIN;
 float iMax        = DEF_IMAX;
 float erpmCeiling = DEF_ERPM;         // 4.1 km/h on this wheel
 float deadbandN   = DEF_DEADBAND;
+float iRevMax     = DEF_IREV;         // 0 = reverse off
+float erpmRevCeil = DEF_EREV;         // 1.2 km/h backwards
 float savedK = DEF_GAIN, savedM = DEF_IMAX, savedE = DEF_ERPM, savedB = DEF_DEADBAND;
+float savedR = DEF_IREV, savedV = DEF_EREV;
 
 
 // ---------------- state ----------------
@@ -242,20 +263,22 @@ void say(const String &msg) {
 
 void sendLimits() {
   char b[64];
-  snprintf(b, sizeof b, "L %.2f %.2f %.0f %.1f\n", I_HARD_CAP, GAIN_HARD_MAX, ERPM_HARD_MAX, DEADBAND_MIN);
+  snprintf(b, sizeof b, "L %.2f %.2f %.0f %.1f %.2f %.0f\n", I_HARD_CAP, GAIN_HARD_MAX, ERPM_HARD_MAX, DEADBAND_MIN,
+           I_REV_HARD_CAP, ERPM_REV_HARD_MAX);
   bleQueue(b, strlen(b));
 }
 
 bool unsavedTune() {
   return fabs(gainAperN - savedK) > 1e-4f || fabs(iMax - savedM) > 1e-4f ||
-         fabs(erpmCeiling - savedE) > 0.5f || fabs(deadbandN - savedB) > 1e-3f;
+         fabs(erpmCeiling - savedE) > 0.5f || fabs(deadbandN - savedB) > 1e-3f ||
+         fabs(iRevMax - savedR) > 1e-4f || fabs(erpmRevCeil - savedV) > 0.5f;
 }
 
 void sendParams() {
-  char b[96];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d\n",
+  char b[112];
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f\n",
            gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
-           unsavedTune() ? 1 : 0);
+           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil);
   bleQueue(b, strlen(b));
 }
 
@@ -312,10 +335,11 @@ void sendPayload(const uint8_t *p, uint8_t n) {
 
 // EVERY motion command goes through here. One clamp, one path to the motor.
 void sendCurrent(float amps) {
-  if (!armed)          amps = 0.0f;
-  if (amps > iMax)     amps = iMax;
-  if (amps > I_HARD_CAP) amps = I_HARD_CAP;
-  if (amps < 0.0f)     amps = 0.0f;        // forward only in this sketch
+  if (!armed)                  amps = 0.0f;
+  if (amps > iMax)             amps = iMax;
+  if (amps > I_HARD_CAP)       amps = I_HARD_CAP;
+  if (amps < -iRevMax)         amps = -iRevMax;        // 0 here = no reverse at all
+  if (amps < -I_REV_HARD_CAP)  amps = -I_REV_HARD_CAP;
   int32_t ma = (int32_t)(amps * 1000.0f);
   uint8_t p[5];
   p[0] = COMM_SET_CURRENT;
@@ -360,6 +384,7 @@ bool pollSpeed() {
   int i = 23;   // skip to rpm: id(1) temps(4) currents(16) duty(2)
   lastErpm = ((int32_t)rxBuf[i] << 24) | ((int32_t)rxBuf[i+1] << 16) |
              ((int32_t)rxBuf[i+2] << 8) | (int32_t)rxBuf[i+3];
+  lastErpm *= ERPM_SIGN;
   return true;
 }
 
@@ -442,7 +467,7 @@ void allStop(const char *why) {
 void help() {
   Serial.println("# a arm | x STOP | t tare | d stream | p params | h help");
   Serial.println("# c <slope> <intercept>  set calibration directly");
-  Serial.println("# k <A/N> gain | m <A> max | e <erpm> ceiling | b <N> deadband | w save");
+  Serial.println("# k <A/N> gain | m <A> max | e <erpm> ceiling | b <N> deadband | r <A> v <erpm> reverse | w save");
   Serial.print("# gain "); Serial.print(gainAperN, 3);
   Serial.print("  max "); Serial.print(iMax, 2);
   Serial.print(" A  ceiling "); Serial.print(erpmCeiling, 0);
@@ -520,12 +545,14 @@ void handleLine(String line, Source src) {
     return;
   }
 
-  if (c == 'k' || c == 'm' || c == 'e' || c == 'b') {
+  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v') {
     if (!hasNum) { say("? needs a number, e.g. k 0.10"); return; }
     if      (c == 'k') gainAperN   = bounded("gain",     v, 0.01f, GAIN_HARD_MAX);
     else if (c == 'm') iMax        = bounded("max amps", v, 0.10f, I_HARD_CAP);
     else if (c == 'e') erpmCeiling = bounded("ceiling",  v, 200.0f, ERPM_HARD_MAX);
     else if (c == 'b') deadbandN   = bounded("deadband", v, DEADBAND_MIN, 20.0f);
+    else if (c == 'r') iRevMax     = bounded("reverse max", v, 0.0f, I_REV_HARD_CAP);
+    else if (c == 'v') erpmRevCeil = bounded("reverse ceiling", v, 100.0f, ERPM_REV_HARD_MAX);
     if (phone) { say(String("set ") + c + " " + arg); sendParams(); }
     else help();
     return;
@@ -535,17 +562,20 @@ void handleLine(String line, Source src) {
     prefs.begin("tune", false);
     prefs.putFloat("k", gainAperN); prefs.putFloat("m", iMax);
     prefs.putFloat("e", erpmCeiling); prefs.putFloat("b", deadbandN);
+    prefs.putFloat("r", iRevMax); prefs.putFloat("v", erpmRevCeil);
     prefs.putBool("valid", true);
     prefs.end();
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
+    savedR = iRevMax; savedV = erpmRevCeil;
     say("saved: gain " + String(gainAperN, 3) + "  max " + String(iMax, 2) + " A  ceiling "
-        + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N. these load at switch-on.");
+        + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N  reverse "
+        + String(iRevMax, 2) + " A / " + String(erpmRevCeil, 0) + " erpm. these load at switch-on.");
     sendParams();
     return;
   }
 
   if (c == 'p') { sendParams(); if (!phone) help(); return; }
-  if (c == 'h') { help(); if (phone) say("phone: k m e b w x t c p. arming is the ESC switch."); return; }
+  if (c == 'h') { help(); if (phone) say("phone: k m e b r v w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");
 }
@@ -584,7 +614,10 @@ void setup() {
     iMax        = bounded("saved max amps", prefs.getFloat("m", DEF_IMAX),     0.10f, I_HARD_CAP);
     erpmCeiling = bounded("saved ceiling",  prefs.getFloat("e", DEF_ERPM),     200.0f, ERPM_HARD_MAX);
     deadbandN   = bounded("saved deadband", prefs.getFloat("b", DEF_DEADBAND), DEADBAND_MIN, 20.0f);
+    iRevMax     = bounded("saved reverse max", prefs.getFloat("r", DEF_IREV), 0.0f, I_REV_HARD_CAP);
+    erpmRevCeil = bounded("saved reverse ceiling", prefs.getFloat("v", DEF_EREV), 100.0f, ERPM_REV_HARD_MAX);
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
+    savedR = iRevMax; savedV = erpmRevCeil;
     Serial.println("# loaded saved tuning from flash.");
   } else {
     Serial.println("# no saved tuning -- using defaults.");
@@ -655,15 +688,24 @@ void loop() {
   }
 
   // ---- the law, such as it is ----
+  // Which way is the wheel going? Inside the rest band counts as stopped.
+  bool rollingFwd  = lastErpm >  REST_ERPM;
+  bool rollingBack = lastErpm < -REST_ERPM;
+
   float want = 0.0f;
   if (armed) {
-    float f = forceN - deadbandN;
-    if (f > 0.0f) want = f * gainAperN;
-    if (want > iMax) want = iMax;
+    if (forceN > deadbandN) {                          // PUSH
+      if (!rollingBack) want = (forceN - deadbandN) * gainAperN;
+      if (want > iMax) want = iMax;                    // rolling back + push = nothing yet
+    } else if (forceN < -deadbandN && iRevMax > 0.0f) { // PULL
+      if (!rollingFwd) want = (forceN + deadbandN) * gainAperN;   // negative
+      if (want < -iRevMax) want = -iRevMax;            // rolling fwd + pull = nothing yet
+    }
   }
 
-  ceilingHit = (fabs((float)lastErpm) > erpmCeiling);
-  if (ceilingHit) want = 0.0f;         // hard ceiling, no blending yet
+  // hard ceilings, each direction its own, no blending yet
+  ceilingHit = (lastErpm > erpmCeiling) || (lastErpm < -erpmRevCeil);
+  if (ceilingHit) want = 0.0f;
 
   float maxStep = RAMP_A_PER_S * (SEND_MS / 1000.0f);
   if (want > cmdAmps + maxStep) cmdAmps += maxStep;

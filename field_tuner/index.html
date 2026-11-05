@@ -167,8 +167,8 @@
 
   // Hard limits arrive from the firmware in the L line. These are only
   // placeholders until then; the firmware clamps regardless.
-  const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0 };
-  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false };
+  const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0, rCap: 1.5, vMax: 1000 };
+  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false };
   let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
 
   // ---------------------------------------------------------------- tunables
@@ -181,6 +181,10 @@
       min:()=>200,  max:()=>limits.eMax, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm` },
     { key:'b', name:'Deadband',    sub:'force ignored before assist starts', unit:'N', step:0.5,  dp:1,
       min:()=>limits.bMin, max:()=>20 },
+    { key:'r', name:'Reverse max current', sub:'pull at rest backs the chair up · 0 = reverse off', unit:'A', step:0.1, dp:1,
+      min:()=>0, max:()=>limits.rCap, rev:true },
+    { key:'v', name:'Reverse speed ceiling', sub:'reverse cuts out above this', unit:'km/h', step:50, dp:0,
+      min:()=>100, max:()=>limits.vMax, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm`, rev:true },
   ];
   const ui = {};
   const host = $('tunables');
@@ -237,6 +241,7 @@
   // The firmware's echo (P line) is the only truth shown as the value.
   function renderParams(){
     for (const u of Object.values(ui)) {
+      if (u.d.rev) u.el.style.display = P.hasRev ? '' : 'none';   // older firmware: no reverse
       const v = P[u.d.key];
       if (v == null) continue;
       u.val.textContent = fmt(u.d, v);
@@ -253,7 +258,8 @@
   // The firmware says whether live settings differ from saved ones (last field
   // of P). Old firmware does not send it, and cannot save at all.
   let savedVals = null, savedAt = null;
-  const fmtSet = v => `gain ${v.k.toFixed(2)} · max ${v.m.toFixed(1)} A · ceiling ${(v.e/ERPM_PER_KMH).toFixed(1)} km/h · deadband ${v.b.toFixed(1)} N`;
+  const fmtSet = v => `gain ${v.k.toFixed(2)} · max ${v.m.toFixed(1)} A · ceiling ${(v.e/ERPM_PER_KMH).toFixed(1)} km/h · deadband ${v.b.toFixed(1)} N`
+    + (v.r != null ? ` · reverse ${v.r > 0 ? v.r.toFixed(1) + ' A / ' + (v.v/ERPM_PER_KMH).toFixed(1) + ' km/h' : 'off'}` : '');
   function renderSave(){
     const btn = $('save'), hint = $('savehint'), card = btn.closest('.card');
     if (P.k == null) return;
@@ -262,7 +268,7 @@
       hint.textContent = 'This firmware cannot save. Reflash assist_chair with the Save version.';
       return;
     }
-    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b };
+    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b, r:P.r, v:P.v };
     card.classList.toggle('dirty', P.unsaved);
     btn.disabled = !rxChar || !P.unsaved;
     if (P.unsaved) {
@@ -274,6 +280,8 @@
         if (Math.abs(P.m - savedVals.m) > 1e-4) ch.push(`max ${savedVals.m.toFixed(1)} → ${P.m.toFixed(1)} A`);
         if (Math.abs(P.e - savedVals.e) > 0.5)  ch.push(`ceiling ${(savedVals.e/ERPM_PER_KMH).toFixed(1)} → ${(P.e/ERPM_PER_KMH).toFixed(1)} km/h`);
         if (Math.abs(P.b - savedVals.b) > 1e-3) ch.push(`deadband ${savedVals.b.toFixed(1)} → ${P.b.toFixed(1)} N`);
+        if (P.r != null && savedVals.r != null && Math.abs(P.r - savedVals.r) > 1e-4) ch.push(`reverse max ${savedVals.r.toFixed(1)} → ${P.r.toFixed(1)} A`);
+        if (P.v != null && savedVals.v != null && Math.abs(P.v - savedVals.v) > 0.5) ch.push(`reverse ceiling ${(savedVals.v/ERPM_PER_KMH).toFixed(1)} → ${(P.v/ERPM_PER_KMH).toFixed(1)} km/h`);
         what = ch.join(' · ');
       }
       hint.textContent = 'Unsaved — lost if the ESP32 loses power.' + (what ? ' Changed: ' + what : '');
@@ -303,8 +311,10 @@
     $('f').textContent = t.F.toFixed(1);
     $('i').textContent = t.I.toFixed(2);
     const iMax = P.m || limits.iCap;
-    $('iof').textContent = `A of ${iMax.toFixed(1)}`;
-    $('imeter').style.width = Math.min(100, 100 * t.I / iMax) + '%';
+    const rev = t.I < 0, cap = rev ? (P.r || limits.rCap) : iMax;
+    $('iof').textContent = rev ? `A reverse · of ${cap.toFixed(1)}` : `A of ${iMax.toFixed(1)}`;
+    $('imeter').style.width = Math.min(100, 100 * Math.abs(t.I) / (cap || 1)) + '%';
+    $('imeter').style.background = rev ? 'var(--warn)' : 'var(--accent)';
     $('v').textContent = (t.erpm / ERPM_PER_KMH).toFixed(1);
     $('erpm').textContent = `km/h · ${t.erpm} erpm`;
     $('tare').disabled = armed || !rxChar;
@@ -330,10 +340,11 @@
       lastT = Date.now();
       renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6] });
     } else if (p[0] === 'P' && p.length >= 8) {
-      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9 });
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9, hasRev: p.length >= 11, r: p.length >= 11 ? +p[9] : null, v: p.length >= 11 ? +p[10] : null });
       renderParams();
     } else if (p[0] === 'L' && p.length >= 5) {
       Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
+      if (p.length >= 7) Object.assign(limits, { rCap:+p[5], vMax:+p[6] });
       applyRanges(); renderParams();
     } else if (line.startsWith('#')) {
       const msg = line.slice(1).trim();
