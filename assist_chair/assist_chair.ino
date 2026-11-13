@@ -11,6 +11,14 @@
     at rest            assist              reverse, capped
     rolling backward   nothing (later)     reverse, capped
 
+  LEVER (11/07): a potentiometer on GPIO 34, driven by a brake-lever cable.
+  Squeeze -> help rises to max current. Let go -> help stops. Forward only.
+  The reading at switch-on (lever released) is its zero; span sets how much
+  more reading equals a full squeeze. Load cell and lever both run; the
+  larger request wins. Pulling MUST raise the reading -- a broken wire then
+  reads 0 = no help. If yours falls when pulled, swap the pot's outer wires.
+  No pot found at switch-on (reads near 0 V) -> lever ignored until next one.
+
   'At rest' is |v| <= 0.15 m/s, the band from the control grid. Pull uses the
   same gain and deadband as push, mirrored. Reverse has its own current cap
   and speed ceiling, both lower. Reverse max = 0 turns reverse off.
@@ -65,18 +73,23 @@
     b <N>       deadband in newtons        (default 4.0)
     r <A>       reverse max current        (default 0.8, hard cap 1.5, 0 = off)
     v <erpm>    reverse speed ceiling      (default 600 = 1.2 km/h, max 1000)
+    g <counts>  lever span: reading above rest for a full squeeze (default 1200)
     c <s> <i>   calibration slope/intercept, saved to flash   (disarmed only)
     t           tare now and accept it as the new zero        (disarmed only)
                 -- the way out when the mount changed and auto-tare keeps refusing
     d           toggle the USB live stream  USB only
-    w           save k m e b r v to flash -- the values it starts with next time
+    j <A> <s>   DEMO: drive forward at <A> amps for <s> seconds (max 5 s).
+                USB only, armed only. Capped by max current, speed ceiling
+                and ramp like everything else. x / phone STOP / ESC off end it.
+    w           save k m e b r v g to flash -- the values it starts with next time
     p           report parameters
     h           help
 
   PHONE PROTOCOL  (text lines, '\n' terminated, sent in 20-byte notifications)
     L <iCap> <kMax> <eMax> <bMin> <rCap> <vMax>          hard limits
-    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v>   parameters
-    T <armed> <F N> <I A> <erpm> <ceiling> <state>       telemetry, 5 Hz
+    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g>   parameters
+    T <armed> <F N> <I A> <erpm> <ceiling> <state> <lever %> <lever raw>   telemetry, 5 Hz
+                                         (lever % is -1 when no lever was found)
         state: F fault  W waiting for ESC  Z taring  H hand on bar
                A armed  S stopped (cycle power)
     # <text>                                             human message
@@ -95,6 +108,7 @@
 const int PIN_DT  = 18;
 const int PIN_SCK = 19;
 const int PIN_LED = 25;
+const int PIN_LEVER = 34;           // ADC1 -- still readable with Bluetooth on
 const int PIN_RX  = 16;
 const int PIN_TX  = 17;
 
@@ -116,6 +130,9 @@ const float REST_ERPM         = 260.0f;  // 0.15 m/s = 0.54 km/h x 482 erpm per 
 // If the speed reads NEGATIVE while the wheel turns forward, set this to -1.
 // Everything about direction depends on it. Check it before trusting reverse.
 const int   ERPM_SIGN         = 1;
+const float LEVER_PRESENT_MIN = 100.0f;  // below this at switch-on = no pot plugged in
+const float LEVER_DEADZONE    = 0.08f;   // first 8% of the squeeze does nothing
+const float LEVER_ALPHA       = 0.2f;    // smoothing
 const float RAMP_A_PER_S  = 4.0f;     // how fast current may change
 const unsigned long SEND_MS = 20;     // 50 Hz, well inside the ESC's 1 s timeout
 const unsigned long POLL_MS = 200;    // how often we ask for speed
@@ -131,15 +148,20 @@ const unsigned long TARE_RETRY_MS = 2000;
 // Defaults, used until something is saved with 'w'. Saved values are loaded
 // at boot (and re-clamped, in case the hard limits above have since changed).
 const float DEF_GAIN = 0.10f, DEF_IMAX = 1.5f, DEF_ERPM = 2000.0f, DEF_DEADBAND = 4.0f;
-const float DEF_IREV = 0.8f, DEF_EREV = 600.0f;
+const float DEF_IREV = 0.8f, DEF_EREV = 600.0f, DEF_SPAN = 1200.0f;
 float gainAperN   = DEF_GAIN;
 float iMax        = DEF_IMAX;
 float erpmCeiling = DEF_ERPM;         // 4.1 km/h on this wheel
 float deadbandN   = DEF_DEADBAND;
 float iRevMax     = DEF_IREV;         // 0 = reverse off
 float erpmRevCeil = DEF_EREV;         // 1.2 km/h backwards
+float leverSpan   = DEF_SPAN;         // ADC counts above rest = full squeeze
 float savedK = DEF_GAIN, savedM = DEF_IMAX, savedE = DEF_ERPM, savedB = DEF_DEADBAND;
-float savedR = DEF_IREV, savedV = DEF_EREV;
+float savedR = DEF_IREV, savedV = DEF_EREV, savedG = DEF_SPAN;
+
+// lever state
+float leverRaw = 0.0f, leverRest = 0.0f, leverFrac = 0.0f;
+bool  leverPresent = false;
 
 
 // ---------------- state ----------------
@@ -168,6 +190,8 @@ int   escReplies = 0;
 unsigned long lastEscReply = 0, lastTareTry = 0;
 
 unsigned long lastSend = 0, lastPoll = 0, lastPrint = 0, lastTele = 0;
+unsigned long jogUntil = 0;  float jogAmps = 0.0f;   // USB demo command
+const float JOG_MAX_S = 5.0f;
 uint8_t rxBuf[512];
 
 // ---------------------------------------------------------------- BLE link
@@ -271,21 +295,23 @@ void sendLimits() {
 bool unsavedTune() {
   return fabs(gainAperN - savedK) > 1e-4f || fabs(iMax - savedM) > 1e-4f ||
          fabs(erpmCeiling - savedE) > 0.5f || fabs(deadbandN - savedB) > 1e-3f ||
-         fabs(iRevMax - savedR) > 1e-4f || fabs(erpmRevCeil - savedV) > 0.5f;
+         fabs(iRevMax - savedR) > 1e-4f || fabs(erpmRevCeil - savedV) > 0.5f ||
+         fabs(leverSpan - savedG) > 0.5f;
 }
 
 void sendParams() {
   char b[112];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f\n",
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f\n",
            gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
-           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil);
+           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan);
   bleQueue(b, strlen(b));
 }
 
 void sendTelemetry() {
-  char b[64];
-  snprintf(b, sizeof b, "T %d %.1f %.2f %ld %d %c\n",
-           armed ? 1 : 0, forceN, cmdAmps, (long)lastErpm, ceilingHit ? 1 : 0, STATE_CODE[state]);
+  char b[80];
+  snprintf(b, sizeof b, "T %d %.1f %.2f %ld %d %c %d %d\n",
+           armed ? 1 : 0, forceN, cmdAmps, (long)lastErpm, ceilingHit ? 1 : 0, STATE_CODE[state],
+           leverPresent ? (int)(leverFrac * 100.0f + 0.5f) : -1, (int)leverRaw);
   bleQueue(b, strlen(b));
 }
 
@@ -414,7 +440,17 @@ bool sampleZero(long &mean, long &spread) {
   return true;
 }
 
+// The lever's zero is taken with the load cell's: at switch-on, hands off.
+void captureLeverRest() {
+  float sum = 0; for (int i = 0; i < 16; i++) { sum += analogRead(PIN_LEVER); delay(1); }
+  leverRest = leverRaw = sum / 16.0f;
+  leverPresent = leverRest > LEVER_PRESENT_MIN;
+  say(leverPresent ? "lever found, rest " + String(leverRest, 0)
+                   : String("no lever on GPIO 34 -- ignored until next switch-on."));
+}
+
 void acceptZero(long z) {
+  captureLeverRest();
   zeroOffset = z; smoothed = 0.0f; forceN = 0.0f;
   savedZero = z; savedZeroValid = true;
   prefs.begin("handle", false); prefs.putLong("zero", z); prefs.putBool("zvalid", true); prefs.end();
@@ -538,6 +574,20 @@ void handleLine(String line, Source src) {
     return;
   }
 
+  if (c == 'j') {
+    if (phone)  { say("demo drive is USB only."); return; }
+    if (!armed) { say("demo drive: arm first (ESC switch on, hands off)."); return; }
+    int sp = arg.indexOf(' ');
+    float amps = (sp > 0) ? arg.substring(0, sp).toFloat() : arg.toFloat();
+    float secs = (sp > 0) ? arg.substring(sp + 1).toFloat() : 2.0f;
+    if (amps <= 0.0f || secs <= 0.0f) { say("usage:  j <amps> <seconds>   e.g. j 1.0 3"); return; }
+    if (amps > iMax) amps = iMax;
+    if (secs > JOG_MAX_S) secs = JOG_MAX_S;
+    jogAmps = amps; jogUntil = millis() + (unsigned long)(secs * 1000.0f);
+    say("DEMO: " + String(amps, 2) + " A for " + String(secs, 1) + " s. x stops.");
+    return;
+  }
+
   if (c == 'd') {
     if (phone) { say("stream toggle is USB only."); return; }
     streaming = !streaming;
@@ -545,7 +595,7 @@ void handleLine(String line, Source src) {
     return;
   }
 
-  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v') {
+  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v' || c == 'g') {
     if (!hasNum) { say("? needs a number, e.g. k 0.10"); return; }
     if      (c == 'k') gainAperN   = bounded("gain",     v, 0.01f, GAIN_HARD_MAX);
     else if (c == 'm') iMax        = bounded("max amps", v, 0.10f, I_HARD_CAP);
@@ -553,6 +603,7 @@ void handleLine(String line, Source src) {
     else if (c == 'b') deadbandN   = bounded("deadband", v, DEADBAND_MIN, 20.0f);
     else if (c == 'r') iRevMax     = bounded("reverse max", v, 0.0f, I_REV_HARD_CAP);
     else if (c == 'v') erpmRevCeil = bounded("reverse ceiling", v, 100.0f, ERPM_REV_HARD_MAX);
+    else if (c == 'g') leverSpan   = bounded("lever span", v, 200.0f, 4000.0f);
     if (phone) { say(String("set ") + c + " " + arg); sendParams(); }
     else help();
     return;
@@ -562,11 +613,11 @@ void handleLine(String line, Source src) {
     prefs.begin("tune", false);
     prefs.putFloat("k", gainAperN); prefs.putFloat("m", iMax);
     prefs.putFloat("e", erpmCeiling); prefs.putFloat("b", deadbandN);
-    prefs.putFloat("r", iRevMax); prefs.putFloat("v", erpmRevCeil);
+    prefs.putFloat("r", iRevMax); prefs.putFloat("v", erpmRevCeil); prefs.putFloat("g", leverSpan);
     prefs.putBool("valid", true);
     prefs.end();
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
-    savedR = iRevMax; savedV = erpmRevCeil;
+    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan;
     say("saved: gain " + String(gainAperN, 3) + "  max " + String(iMax, 2) + " A  ceiling "
         + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N  reverse "
         + String(iRevMax, 2) + " A / " + String(erpmRevCeil, 0) + " erpm. these load at switch-on.");
@@ -575,7 +626,7 @@ void handleLine(String line, Source src) {
   }
 
   if (c == 'p') { sendParams(); if (!phone) help(); return; }
-  if (c == 'h') { help(); if (phone) say("phone: k m e b r v w x t c p. arming is the ESC switch."); return; }
+  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");
 }
@@ -586,6 +637,7 @@ void setup() {
   Serial.begin(115200);
   delay(400);
   pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_LEVER, INPUT);            // 100k pull-down on the board, no internal pulls on 34
   VESC.begin(VESC_BAUD, SERIAL_8N1, PIN_RX, PIN_TX);
 
   Serial.println();
@@ -616,8 +668,9 @@ void setup() {
     deadbandN   = bounded("saved deadband", prefs.getFloat("b", DEF_DEADBAND), DEADBAND_MIN, 20.0f);
     iRevMax     = bounded("saved reverse max", prefs.getFloat("r", DEF_IREV), 0.0f, I_REV_HARD_CAP);
     erpmRevCeil = bounded("saved reverse ceiling", prefs.getFloat("v", DEF_EREV), 100.0f, ERPM_REV_HARD_MAX);
+    leverSpan   = bounded("saved lever span", prefs.getFloat("g", DEF_SPAN), 200.0f, 4000.0f);
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
-    savedR = iRevMax; savedV = erpmRevCeil;
+    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan;
     Serial.println("# loaded saved tuning from flash.");
   } else {
     Serial.println("# no saved tuning -- using defaults.");
@@ -688,6 +741,15 @@ void loop() {
   }
 
   // ---- the law, such as it is ----
+  // ---- lever ----
+  leverRaw = (1.0f - LEVER_ALPHA) * leverRaw + LEVER_ALPHA * (float)analogRead(PIN_LEVER);
+  leverFrac = 0.0f;
+  if (leverPresent && leverSpan > 0.0f) {
+    float f = (leverRaw - leverRest) / leverSpan;        // below rest (or a broken wire) -> negative -> 0
+    f = (f - LEVER_DEADZONE) / (1.0f - LEVER_DEADZONE);
+    leverFrac = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+  }
+
   // Which way is the wheel going? Inside the rest band counts as stopped.
   bool rollingFwd  = lastErpm >  REST_ERPM;
   bool rollingBack = lastErpm < -REST_ERPM;
@@ -701,6 +763,18 @@ void loop() {
       if (!rollingFwd) want = (forceN + deadbandN) * gainAperN;   // negative
       if (want < -iRevMax) want = -iRevMax;            // rolling fwd + pull = nothing yet
     }
+  }
+
+  // lever: squeeze -> forward help up to max current. larger request wins.
+  if (armed && !rollingBack && leverFrac > 0.0f) {
+    float lv = leverFrac * iMax;
+    if (lv > want) want = lv;
+  }
+
+  // USB demo drive: overrides the force law while it runs, armed only
+  if (jogUntil) {
+    if (!armed || (long)(millis() - jogUntil) >= 0) { jogUntil = 0; if (armed) say("demo done."); }
+    else want = jogAmps;
   }
 
   // hard ceilings, each direction its own, no blending yet
@@ -729,6 +803,8 @@ void loop() {
     Serial.print("I "); Serial.print(cmdAmps, 2); Serial.print(" A   ");
     Serial.print("erpm "); Serial.print(lastErpm);
     Serial.print("  "); Serial.print(lastErpm / 482.0f, 2); Serial.print(" km/h");
+    Serial.print("   lever "); Serial.print((int)leverRaw);
+    if (leverPresent) { Serial.print(" "); Serial.print((int)(leverFrac * 100)); Serial.print("%"); }
     if (ceilingHit) Serial.print("   [CEILING]");
     Serial.println();
   }

@@ -56,6 +56,8 @@
   .statenote.warn{color:var(--warn)} .statenote.bad{color:var(--stop)}
   .state .big.fault{background:var(--stop);border-color:var(--stop);color:#fff}
   .state .big.hand{border-color:var(--warn);color:var(--warn)}
+  .levernote{font-size:14px;color:var(--muted);margin:6px 2px 0;font-variant-numeric:tabular-nums;min-height:18px}
+  .levernote b{color:var(--ink)}
   .stalenote{display:none;font-size:13px;color:var(--warn);margin:6px 2px 0;font-weight:600}
   .stale .stalenote{display:block}
 
@@ -121,6 +123,7 @@
     <div><label>Current</label><output id="i">—</output><span id="iof">A</span><div class="meter"><i id="imeter"></i></div></div>
     <div><label>Speed</label><output id="v">—</output><span id="erpm">km/h</span></div>
   </div>
+  <div class="levernote" id="levernote"></div>
   <div class="stalenote" id="stalenote">No live data — readings are old.</div>
 
   <h2>Tuning</h2>
@@ -168,7 +171,7 @@
   // Hard limits arrive from the firmware in the L line. These are only
   // placeholders until then; the firmware clamps regardless.
   const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0, rCap: 1.5, vMax: 1000 };
-  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false };
+  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false, g: null, hasLever: false };
   let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
 
   // ---------------------------------------------------------------- tunables
@@ -185,6 +188,8 @@
       min:()=>0, max:()=>limits.rCap, rev:true },
     { key:'v', name:'Reverse speed ceiling', sub:'reverse cuts out above this', unit:'km/h', step:50, dp:0,
       min:()=>100, max:()=>limits.vMax, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm`, rev:true },
+    { key:'g', name:'Lever span', sub:'how much more reading = a full squeeze · lower = full help sooner', unit:'counts', step:50, dp:0,
+      min:()=>200, max:()=>4000, lever:true },
   ];
   const ui = {};
   const host = $('tunables');
@@ -242,6 +247,7 @@
   function renderParams(){
     for (const u of Object.values(ui)) {
       if (u.d.rev) u.el.style.display = P.hasRev ? '' : 'none';   // older firmware: no reverse
+      if (u.d.lever) u.el.style.display = P.hasLever ? '' : 'none';
       const v = P[u.d.key];
       if (v == null) continue;
       u.val.textContent = fmt(u.d, v);
@@ -268,7 +274,7 @@
       hint.textContent = 'This firmware cannot save. Reflash assist_chair with the Save version.';
       return;
     }
-    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b, r:P.r, v:P.v };
+    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b, r:P.r, v:P.v, g:P.g };
     card.classList.toggle('dirty', P.unsaved);
     btn.disabled = !rxChar || !P.unsaved;
     if (P.unsaved) {
@@ -281,6 +287,7 @@
         if (Math.abs(P.e - savedVals.e) > 0.5)  ch.push(`ceiling ${(savedVals.e/ERPM_PER_KMH).toFixed(1)} → ${(P.e/ERPM_PER_KMH).toFixed(1)} km/h`);
         if (Math.abs(P.b - savedVals.b) > 1e-3) ch.push(`deadband ${savedVals.b.toFixed(1)} → ${P.b.toFixed(1)} N`);
         if (P.r != null && savedVals.r != null && Math.abs(P.r - savedVals.r) > 1e-4) ch.push(`reverse max ${savedVals.r.toFixed(1)} → ${P.r.toFixed(1)} A`);
+        if (P.g != null && savedVals.g != null && Math.abs(P.g - savedVals.g) > 0.5) ch.push(`lever span ${savedVals.g} → ${P.g}`);
         if (P.v != null && savedVals.v != null && Math.abs(P.v - savedVals.v) > 0.5) ch.push(`reverse ceiling ${(savedVals.v/ERPM_PER_KMH).toFixed(1)} → ${(P.v/ERPM_PER_KMH).toFixed(1)} km/h`);
         what = ch.join(' · ');
       }
@@ -316,6 +323,9 @@
     $('imeter').style.width = Math.min(100, 100 * Math.abs(t.I) / (cap || 1)) + '%';
     $('imeter').style.background = rev ? 'var(--warn)' : 'var(--accent)';
     $('v').textContent = (t.erpm / ERPM_PER_KMH).toFixed(1);
+    $('levernote').innerHTML = t.lever == null ? ''
+      : t.lever < 0 ? `Lever: none found at switch-on · raw ${t.leverRaw}`
+      : `Lever: <b>${t.lever}%</b> · raw ${t.leverRaw}`;
     $('erpm').textContent = `km/h · ${t.erpm} erpm`;
     $('tare').disabled = armed || !rxChar;
     $('calsave').disabled = armed || !rxChar;
@@ -338,9 +348,10 @@
     const p = line.split(/\s+/);
     if (p[0] === 'T' && p.length >= 6) {
       lastT = Date.now();
-      renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6] });
+      renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6],
+                   lever: p.length >= 9 ? +p[7] : null, leverRaw: p.length >= 9 ? +p[8] : null });
     } else if (p[0] === 'P' && p.length >= 8) {
-      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9, hasRev: p.length >= 11, r: p.length >= 11 ? +p[9] : null, v: p.length >= 11 ? +p[10] : null });
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9, hasRev: p.length >= 11, r: p.length >= 11 ? +p[9] : null, v: p.length >= 11 ? +p[10] : null, hasLever: p.length >= 12, g: p.length >= 12 ? +p[11] : null });
       renderParams();
     } else if (p[0] === 'L' && p.length >= 5) {
       Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
