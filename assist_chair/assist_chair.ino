@@ -19,6 +19,16 @@
   reads 0 = no help. If yours falls when pulled, swap the pot's outer wires.
   No pot found at switch-on (reads near 0 V) -> lever ignored until next one.
 
+  SLOW DRIVE (11/13): the one way the phone can move the chair. Hold the
+  button on the phone -> the chair creeps forward; let go -> it stops.
+    - Armed only. The ESC switch is still the arm.
+    - Starting needs two 'f' in a row, so one stray late signal starts nothing.
+    - While held the phone sends 'f' about 4 times a second. If none arrives
+      for 0.8 s (thumb off, phone out of range, page closed) the chair stops.
+    - Its own low speed limit ('y') and its own current ('n', never above
+      max current). Current fades out as the speed limit approaches.
+    - Hard stop after 30 s whatever happens. 'q', x, phone STOP, ESC off end it.
+
   'At rest' is |v| <= 0.15 m/s, the band from the control grid. Pull uses the
   same gain and deadband as push, mirrored. Reverse has its own current cap
   and speed ceiling, both lower. Reverse max = 0 turns reverse off.
@@ -74,6 +84,10 @@
     r <A>       reverse max current        (default 0.8, hard cap 1.5, 0 = off)
     v <erpm>    reverse speed ceiling      (default 600 = 1.2 km/h, max 1000)
     g <counts>  lever span: reading above rest for a full squeeze (default 1200)
+    f           slow drive: keep going (send repeatedly; stops 0.8 s after the last)
+    q           slow drive: stop now (stays armed)
+    n <A>       slow drive current         (default 1.0, never above max current)
+    y <erpm>    slow drive speed limit     (default 300 = 0.6 km/h, max 1000)
     c <s> <i>   calibration slope/intercept, saved to flash   (disarmed only)
     t           tare now and accept it as the new zero        (disarmed only)
                 -- the way out when the mount changed and auto-tare keeps refusing
@@ -81,14 +95,14 @@
     j <A> <s>   DEMO: drive forward at <A> amps for <s> seconds (max 5 s).
                 USB only, armed only. Capped by max current, speed ceiling
                 and ramp like everything else. x / phone STOP / ESC off end it.
-    w           save k m e b r v g to flash -- the values it starts with next time
+    w           save k m e b r v g n y to flash -- the values it starts with next time
     p           report parameters
     h           help
 
   PHONE PROTOCOL  (text lines, '\n' terminated, sent in 20-byte notifications)
     L <iCap> <kMax> <eMax> <bMin> <rCap> <vMax>          hard limits
-    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g>   parameters
-    T <armed> <F N> <I A> <erpm> <ceiling> <state> <lever %> <lever raw>   telemetry, 5 Hz
+    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g> <n> <y>   parameters
+    T <armed> <F N> <I A> <erpm> <ceiling> <state> <lever %> <lever raw> <slow drive 0/1>   telemetry, 5 Hz
                                          (lever % is -1 when no lever was found)
         state: F fault  W waiting for ESC  Z taring  H hand on bar
                A armed  S stopped (cycle power)
@@ -149,6 +163,7 @@ const unsigned long TARE_RETRY_MS = 2000;
 // at boot (and re-clamped, in case the hard limits above have since changed).
 const float DEF_GAIN = 0.10f, DEF_IMAX = 1.5f, DEF_ERPM = 2000.0f, DEF_DEADBAND = 4.0f;
 const float DEF_IREV = 0.8f, DEF_EREV = 600.0f, DEF_SPAN = 1200.0f;
+const float DEF_CREEP_A = 1.0f, DEF_CREEP_ERPM = 300.0f;
 float gainAperN   = DEF_GAIN;
 float iMax        = DEF_IMAX;
 float erpmCeiling = DEF_ERPM;         // 4.1 km/h on this wheel
@@ -156,8 +171,11 @@ float deadbandN   = DEF_DEADBAND;
 float iRevMax     = DEF_IREV;         // 0 = reverse off
 float erpmRevCeil = DEF_EREV;         // 1.2 km/h backwards
 float leverSpan   = DEF_SPAN;         // ADC counts above rest = full squeeze
+float creepAmps   = DEF_CREEP_A;      // slow drive current
+float creepErpm   = DEF_CREEP_ERPM;   // slow drive speed limit, 0.6 km/h
 float savedK = DEF_GAIN, savedM = DEF_IMAX, savedE = DEF_ERPM, savedB = DEF_DEADBAND;
 float savedR = DEF_IREV, savedV = DEF_EREV, savedG = DEF_SPAN;
+float savedN = DEF_CREEP_A, savedY = DEF_CREEP_ERPM;
 
 // lever state
 float leverRaw = 0.0f, leverRest = 0.0f, leverFrac = 0.0f;
@@ -192,6 +210,14 @@ unsigned long lastEscReply = 0, lastTareTry = 0;
 unsigned long lastSend = 0, lastPoll = 0, lastPrint = 0, lastTele = 0;
 unsigned long jogUntil = 0;  float jogAmps = 0.0f;   // USB demo command
 const float JOG_MAX_S = 5.0f;
+
+// slow drive from the phone (hold to go)
+const unsigned long CREEP_HEARTBEAT_MS = 800;    // no 'f' for this long -> stop
+const unsigned long CREEP_MAX_MS       = 30000;  // one hold never runs longer than this
+const float CREEP_ERPM_HARD_MAX        = 1000.0f; // ~2.1 km/h
+bool creepOn = false;
+unsigned long creepStart = 0, creepLast = 0, creepPrime = 0;
+const unsigned long CREEP_PRIME_MS = 600;        // the second 'f' must follow the first within this
 uint8_t rxBuf[512];
 
 // ---------------------------------------------------------------- BLE link
@@ -296,22 +322,23 @@ bool unsavedTune() {
   return fabs(gainAperN - savedK) > 1e-4f || fabs(iMax - savedM) > 1e-4f ||
          fabs(erpmCeiling - savedE) > 0.5f || fabs(deadbandN - savedB) > 1e-3f ||
          fabs(iRevMax - savedR) > 1e-4f || fabs(erpmRevCeil - savedV) > 0.5f ||
-         fabs(leverSpan - savedG) > 0.5f;
+         fabs(leverSpan - savedG) > 0.5f ||
+         fabs(creepAmps - savedN) > 1e-4f || fabs(creepErpm - savedY) > 0.5f;
 }
 
 void sendParams() {
-  char b[112];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f\n",
+  char b[128];
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f\n",
            gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
-           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan);
+           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm);
   bleQueue(b, strlen(b));
 }
 
 void sendTelemetry() {
   char b[80];
-  snprintf(b, sizeof b, "T %d %.1f %.2f %ld %d %c %d %d\n",
+  snprintf(b, sizeof b, "T %d %.1f %.2f %ld %d %c %d %d %d\n",
            armed ? 1 : 0, forceN, cmdAmps, (long)lastErpm, ceilingHit ? 1 : 0, STATE_CODE[state],
-           leverPresent ? (int)(leverFrac * 100.0f + 0.5f) : -1, (int)leverRaw);
+           leverPresent ? (int)(leverFrac * 100.0f + 0.5f) : -1, (int)leverRaw, creepOn ? 1 : 0);
   bleQueue(b, strlen(b));
 }
 
@@ -574,6 +601,21 @@ void handleLine(String line, Source src) {
     return;
   }
 
+  // slow drive. 'f' both starts it and keeps it alive; silence stops it.
+  if (c == 'f') {
+    if (!armed) { if (!creepOn && millis() - creepLast > 2000) { creepLast = millis(); say("slow drive: not armed."); } return; }
+    if (!creepOn) {
+      // Starting takes two 'f' in a row. One stray, late 'f' (a stalled link
+      // delivering it after the thumb is off) must not start the chair.
+      if (creepPrime && millis() - creepPrime < CREEP_PRIME_MS) {
+        creepOn = true; creepStart = millis(); creepPrime = 0; say("slow drive ON.");
+      } else { creepPrime = millis(); return; }
+    }
+    creepLast = millis();
+    return;
+  }
+  if (c == 'q') { creepPrime = 0; if (creepOn) { creepOn = false; say("slow drive off (released)."); } return; }
+
   if (c == 'j') {
     if (phone)  { say("demo drive is USB only."); return; }
     if (!armed) { say("demo drive: arm first (ESC switch on, hands off)."); return; }
@@ -595,7 +637,7 @@ void handleLine(String line, Source src) {
     return;
   }
 
-  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v' || c == 'g') {
+  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v' || c == 'g' || c == 'n' || c == 'y') {
     if (!hasNum) { say("? needs a number, e.g. k 0.10"); return; }
     if      (c == 'k') gainAperN   = bounded("gain",     v, 0.01f, GAIN_HARD_MAX);
     else if (c == 'm') iMax        = bounded("max amps", v, 0.10f, I_HARD_CAP);
@@ -604,6 +646,8 @@ void handleLine(String line, Source src) {
     else if (c == 'r') iRevMax     = bounded("reverse max", v, 0.0f, I_REV_HARD_CAP);
     else if (c == 'v') erpmRevCeil = bounded("reverse ceiling", v, 100.0f, ERPM_REV_HARD_MAX);
     else if (c == 'g') leverSpan   = bounded("lever span", v, 200.0f, 4000.0f);
+    else if (c == 'n') creepAmps   = bounded("slow drive current", v, 0.2f, I_HARD_CAP);
+    else if (c == 'y') creepErpm   = bounded("slow drive speed", v, 100.0f, CREEP_ERPM_HARD_MAX);
     if (phone) { say(String("set ") + c + " " + arg); sendParams(); }
     else help();
     return;
@@ -614,10 +658,11 @@ void handleLine(String line, Source src) {
     prefs.putFloat("k", gainAperN); prefs.putFloat("m", iMax);
     prefs.putFloat("e", erpmCeiling); prefs.putFloat("b", deadbandN);
     prefs.putFloat("r", iRevMax); prefs.putFloat("v", erpmRevCeil); prefs.putFloat("g", leverSpan);
+    prefs.putFloat("n", creepAmps); prefs.putFloat("y", creepErpm);
     prefs.putBool("valid", true);
     prefs.end();
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
-    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan;
+    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm;
     say("saved: gain " + String(gainAperN, 3) + "  max " + String(iMax, 2) + " A  ceiling "
         + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N  reverse "
         + String(iRevMax, 2) + " A / " + String(erpmRevCeil, 0) + " erpm. these load at switch-on.");
@@ -626,7 +671,7 @@ void handleLine(String line, Source src) {
   }
 
   if (c == 'p') { sendParams(); if (!phone) help(); return; }
-  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g w x t c p. arming is the ESC switch."); return; }
+  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g n y f q w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");
 }
@@ -669,8 +714,10 @@ void setup() {
     iRevMax     = bounded("saved reverse max", prefs.getFloat("r", DEF_IREV), 0.0f, I_REV_HARD_CAP);
     erpmRevCeil = bounded("saved reverse ceiling", prefs.getFloat("v", DEF_EREV), 100.0f, ERPM_REV_HARD_MAX);
     leverSpan   = bounded("saved lever span", prefs.getFloat("g", DEF_SPAN), 200.0f, 4000.0f);
+    creepAmps   = bounded("saved slow drive current", prefs.getFloat("n", DEF_CREEP_A), 0.2f, I_HARD_CAP);
+    creepErpm   = bounded("saved slow drive speed", prefs.getFloat("y", DEF_CREEP_ERPM), 100.0f, CREEP_ERPM_HARD_MAX);
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
-    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan;
+    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm;
     Serial.println("# loaded saved tuning from flash.");
   } else {
     Serial.println("# no saved tuning -- using defaults.");
@@ -769,6 +816,22 @@ void loop() {
   if (armed && !rollingBack && leverFrac > 0.0f) {
     float lv = leverFrac * iMax;
     if (lv > want) want = lv;
+  }
+
+  // slow drive from the phone: replaces the force law while the button is held.
+  if (creepOn) {
+    unsigned long now = millis();
+    if (!armed)                               { creepOn = false; }
+    else if (now - creepLast > CREEP_HEARTBEAT_MS) { creepOn = false; say("slow drive off -- lost the phone's signal."); }
+    else if (now - creepStart > CREEP_MAX_MS)      { creepOn = false; say("slow drive off -- 30 s limit."); }
+    else {
+      float amps = creepAmps < iMax ? creepAmps : iMax;
+      // full current below half the speed limit, fading to nothing at the limit
+      float fade = (creepErpm - (float)lastErpm) / (0.5f * creepErpm);
+      if (fade > 1.0f) fade = 1.0f;
+      if (fade < 0.0f) fade = 0.0f;
+      want = amps * fade;
+    }
   }
 
   // USB demo drive: overrides the force law while it runs, armed only

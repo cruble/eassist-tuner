@@ -74,6 +74,11 @@
   input[type=range]{flex:1;height:48px;accent-color:var(--accent);margin:0}
   .range{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:0 58px}
 
+  .gobtn{display:block;width:100%;height:96px;font-size:22px;font-weight:900;letter-spacing:.08em;color:#fff;
+    background:var(--ok);box-shadow:0 4px 0 rgba(0,0,0,.25);
+    user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:none}
+  .gobtn.held{transform:translateY(3px);box-shadow:0 1px 0 rgba(0,0,0,.25);filter:brightness(1.15)}
+  .gobtn.driving{background:var(--warn)}
   .savecard .btn{width:100%;padding:14px}
   .savecard.dirty{border-color:var(--pending)}
   .savecard.dirty #savehint{color:var(--pending);font-weight:600}
@@ -126,6 +131,15 @@
   <div class="levernote" id="levernote"></div>
   <div class="stalenote" id="stalenote">No live data — readings are old.</div>
 
+  <div id="creepsec" style="display:none">
+    <h2>Slow drive</h2>
+    <div class="card">
+      <button id="go" class="gobtn" disabled>HOLD TO DRIVE</button>
+      <div class="hint" id="gohint">Hold to creep forward. Let go to stop. Works only while armed.</div>
+    </div>
+    <div id="creephost"></div>
+  </div>
+
   <h2>Tuning</h2>
   <div id="tunables"></div>
   <div class="card savecard">
@@ -171,7 +185,7 @@
   // Hard limits arrive from the firmware in the L line. These are only
   // placeholders until then; the firmware clamps regardless.
   const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0, rCap: 1.5, vMax: 1000 };
-  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false, g: null, hasLever: false };
+  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false, g: null, hasLever: false, n: null, y: null, hasCreep: false };
   let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
 
   // ---------------------------------------------------------------- tunables
@@ -190,6 +204,10 @@
       min:()=>100, max:()=>limits.vMax, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm`, rev:true },
     { key:'g', name:'Lever span', sub:'how much more reading = a full squeeze · lower = full help sooner', unit:'counts', step:50, dp:0,
       min:()=>200, max:()=>4000, lever:true },
+    { key:'y', name:'Slow drive speed', sub:'the creep never goes faster than this', unit:'km/h', step:50, dp:0,
+      min:()=>100, max:()=>1000, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm`, creep:true },
+    { key:'n', name:'Slow drive current', sub:'how hard it pushes · raise if the chair will not start moving', unit:'A', step:0.1, dp:1,
+      min:()=>0.2, max:()=>limits.iCap, creep:true },
   ];
   const ui = {};
   const host = $('tunables');
@@ -208,7 +226,7 @@
         <button aria-label="more">+</button>
       </div>
       <div class="range"><span class="lo"></span><span class="hi"></span></div>`;
-    host.appendChild(el);
+    (d.creep ? $('creephost') : host).appendChild(el);
     const [minus, plus] = el.querySelectorAll('.ctl button');
     const r = el.querySelector('input');
     const u = ui[d.key] = { d, el, r, minus, plus, val: el.querySelector('.val'),
@@ -248,6 +266,7 @@
     for (const u of Object.values(ui)) {
       if (u.d.rev) u.el.style.display = P.hasRev ? '' : 'none';   // older firmware: no reverse
       if (u.d.lever) u.el.style.display = P.hasLever ? '' : 'none';
+      if (u.d.creep) $('creepsec').style.display = P.hasCreep ? '' : 'none';
       const v = P[u.d.key];
       if (v == null) continue;
       u.val.textContent = fmt(u.d, v);
@@ -274,7 +293,7 @@
       hint.textContent = 'This firmware cannot save. Reflash assist_chair with the Save version.';
       return;
     }
-    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b, r:P.r, v:P.v, g:P.g };
+    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b, r:P.r, v:P.v, g:P.g, n:P.n, y:P.y };
     card.classList.toggle('dirty', P.unsaved);
     btn.disabled = !rxChar || !P.unsaved;
     if (P.unsaved) {
@@ -287,6 +306,8 @@
         if (Math.abs(P.e - savedVals.e) > 0.5)  ch.push(`ceiling ${(savedVals.e/ERPM_PER_KMH).toFixed(1)} → ${(P.e/ERPM_PER_KMH).toFixed(1)} km/h`);
         if (Math.abs(P.b - savedVals.b) > 1e-3) ch.push(`deadband ${savedVals.b.toFixed(1)} → ${P.b.toFixed(1)} N`);
         if (P.r != null && savedVals.r != null && Math.abs(P.r - savedVals.r) > 1e-4) ch.push(`reverse max ${savedVals.r.toFixed(1)} → ${P.r.toFixed(1)} A`);
+        if (P.n != null && savedVals.n != null && Math.abs(P.n - savedVals.n) > 1e-4) ch.push(`slow drive ${savedVals.n.toFixed(1)} → ${P.n.toFixed(1)} A`);
+        if (P.y != null && savedVals.y != null && Math.abs(P.y - savedVals.y) > 0.5) ch.push(`slow drive speed ${(savedVals.y/ERPM_PER_KMH).toFixed(1)} → ${(P.y/ERPM_PER_KMH).toFixed(1)} km/h`);
         if (P.g != null && savedVals.g != null && Math.abs(P.g - savedVals.g) > 0.5) ch.push(`lever span ${savedVals.g} → ${P.g}`);
         if (P.v != null && savedVals.v != null && Math.abs(P.v - savedVals.v) > 0.5) ch.push(`reverse ceiling ${(savedVals.v/ERPM_PER_KMH).toFixed(1)} → ${(P.v/ERPM_PER_KMH).toFixed(1)} km/h`);
         what = ch.join(' · ');
@@ -327,6 +348,7 @@
       : t.lever < 0 ? `Lever: none found at switch-on · raw ${t.leverRaw}`
       : `Lever: <b>${t.lever}%</b> · raw ${t.leverRaw}`;
     $('erpm').textContent = `km/h · ${t.erpm} erpm`;
+    renderGo(t.creep);
     $('tare').disabled = armed || !rxChar;
     $('calsave').disabled = armed || !rxChar;
     $('tarehint').textContent = armed ? 'Armed — tap STOP first to tare. Usually not needed: the chair tares itself at every switch-on.' : 'Hands off the bar. Takes 2 s. Usually not needed — the chair tares itself at every switch-on.';
@@ -349,9 +371,10 @@
     if (p[0] === 'T' && p.length >= 6) {
       lastT = Date.now();
       renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6],
-                   lever: p.length >= 9 ? +p[7] : null, leverRaw: p.length >= 9 ? +p[8] : null });
+                   lever: p.length >= 9 ? +p[7] : null, leverRaw: p.length >= 9 ? +p[8] : null, creep: p[9] === '1' });
     } else if (p[0] === 'P' && p.length >= 8) {
-      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9, hasRev: p.length >= 11, r: p.length >= 11 ? +p[9] : null, v: p.length >= 11 ? +p[10] : null, hasLever: p.length >= 12, g: p.length >= 12 ? +p[11] : null });
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9, hasRev: p.length >= 11, r: p.length >= 11 ? +p[9] : null, v: p.length >= 11 ? +p[10] : null, hasLever: p.length >= 12, g: p.length >= 12 ? +p[11] : null,
+                         hasCreep: p.length >= 14, n: p.length >= 14 ? +p[12] : null, y: p.length >= 14 ? +p[13] : null });
       renderParams();
     } else if (p[0] === 'L' && p.length >= 5) {
       Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
@@ -384,6 +407,7 @@
     $('tare').disabled = !on || armed;
     $('calsave').disabled = !on || armed;
     renderSave(); if (!on) $('save').disabled = true;
+    if (!on) $('go').disabled = true;
     for (const u of Object.values(ui)) { u.r.disabled = u.minus.disabled = u.plus.disabled = !on; }
   }
 
@@ -417,6 +441,7 @@
   }
 
   function onDrop(){
+    goHeld = false; clearInterval(goTimer); $('go').classList.remove('held');
     rxChar = null; setConnected(false);
     if (userClosed) { setPill('offline'); return; }
     log('link lost — chair keeps its settings. retrying…');
@@ -434,6 +459,50 @@
     else if (device && !userClosed && retryTimer) { userClosed = true; clearTimeout(retryTimer); setPill('offline'); }
     else connect();
   });
+
+  // ---------------------------------------------------------------- slow drive
+  // Hold to drive. While held, 'f' goes out 4 times a second; the chair stops
+  // by itself 0.8 s after the last one. Nothing is queued: a late 'f' is never
+  // sent after the thumb is off.
+  let goHeld = false, goTimer = null, beatBusy = false;
+  function beat(){
+    if (!goHeld || !rxChar || beatBusy) return;
+    beatBusy = true;
+    const ch = rxChar, data = enc.encode('f\n');
+    chain = chain.then(() => goHeld ? (ch.writeValueWithoutResponse ? ch.writeValueWithoutResponse(data) : ch.writeValue(data)) : null)
+                 .catch(() => {}).finally(() => { beatBusy = false; });
+  }
+  function startGo(e){
+    if (e) e.preventDefault();
+    if (goHeld || !rxChar || !armed) return;
+    goHeld = true; $('go').classList.add('held');
+    if (navigator.vibrate) navigator.vibrate(30);
+    log('› slow drive: holding', true);
+    beat(); goTimer = setInterval(beat, 250);
+  }
+  function stopGo(){
+    if (!goHeld) return;
+    goHeld = false; clearInterval(goTimer); $('go').classList.remove('held');
+    if (rxChar) { const ch = rxChar; chain = chain.then(() => ch.writeValue(enc.encode('q\n'))).catch(() => {}); }
+    log('› slow drive: released', true);
+  }
+  function renderGo(driving){
+    const b = $('go');
+    b.disabled = !rxChar || !armed;
+    b.classList.toggle('driving', !!driving);
+    b.textContent = driving ? 'DRIVING — LET GO TO STOP' : 'HOLD TO DRIVE';
+    $('gohint').textContent = !rxChar ? 'Not connected.'
+      : !armed ? 'Not armed — switch the ESC on, hands off the bar.'
+      : 'Hold to creep forward. Let go to stop. Stops by itself if the phone loses the chair, and after 30 s.';
+    if (!armed && goHeld) stopGo();
+  }
+  { const b = $('go');
+    b.addEventListener('pointerdown', startGo);
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']) b.addEventListener(ev, stopGo);
+    b.addEventListener('contextmenu', e => e.preventDefault());
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopGo(); });
+    window.addEventListener('blur', stopGo);
+  }
 
   // ---------------------------------------------------------------- buttons
   $('stop').addEventListener('click', () => { if (navigator.vibrate) navigator.vibrate(60); send('x'); });
