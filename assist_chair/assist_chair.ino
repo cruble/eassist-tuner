@@ -19,6 +19,13 @@
   reads 0 = no help. If yours falls when pulled, swap the pot's outer wires.
   No pot found at switch-on (reads near 0 V) -> lever ignored until next one.
 
+  PUSH BAR ON/OFF (11/13): 'u 0' turns the load cell off. The chair then
+  needs no zero: it arms as soon as the ESC answers, ignores the bar
+  entirely, and a missing amplifier or calibration is not a fault. Slow
+  drive and the lever still work. 'u 1' brings the bar and its hands-off
+  tare back. THIS BUILD STARTS WITH THE BAR OFF until a saved setting says
+  otherwise -- on the clamped handle its readings were too noisy to arm.
+
   SLOW DRIVE (11/13): the one way the phone can move the chair. Hold the
   button on the phone -> the chair creeps forward; let go -> it stops.
     - Armed only. The ESC switch is still the arm.
@@ -88,6 +95,7 @@
     q           slow drive: stop now (stays armed)
     n <A>       slow drive current         (default 1.0, never above max current)
     y <erpm>    slow drive speed limit     (default 300 = 0.6 km/h, max 1000)
+    u <0|1>     push bar (load cell) off / on   (default 0 = off, no zeroing)
     c <s> <i>   calibration slope/intercept, saved to flash   (disarmed only)
     t           tare now and accept it as the new zero        (disarmed only)
                 -- the way out when the mount changed and auto-tare keeps refusing
@@ -95,13 +103,13 @@
     j <A> <s>   DEMO: drive forward at <A> amps for <s> seconds (max 5 s).
                 USB only, armed only. Capped by max current, speed ceiling
                 and ramp like everything else. x / phone STOP / ESC off end it.
-    w           save k m e b r v g n y to flash -- the values it starts with next time
+    w           save k m e b r v g n y u to flash -- the values it starts with next time
     p           report parameters
     h           help
 
   PHONE PROTOCOL  (text lines, '\n' terminated, sent in 20-byte notifications)
     L <iCap> <kMax> <eMax> <bMin> <rCap> <vMax>          hard limits
-    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g> <n> <y>   parameters
+    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g> <n> <y> <u>   parameters
     T <armed> <F N> <I A> <erpm> <ceiling> <state> <lever %> <lever raw> <slow drive 0/1>   telemetry, 5 Hz
                                          (lever % is -1 when no lever was found)
         state: F fault  W waiting for ESC  Z taring  H hand on bar
@@ -176,6 +184,8 @@ float creepErpm   = DEF_CREEP_ERPM;   // slow drive speed limit, 0.6 km/h
 float savedK = DEF_GAIN, savedM = DEF_IMAX, savedE = DEF_ERPM, savedB = DEF_DEADBAND;
 float savedR = DEF_IREV, savedV = DEF_EREV, savedG = DEF_SPAN;
 float savedN = DEF_CREEP_A, savedY = DEF_CREEP_ERPM;
+const bool DEF_USE_CELL = false;     // push bar off by default in this build
+bool  useCell = DEF_USE_CELL, savedU = DEF_USE_CELL;
 
 // lever state
 float leverRaw = 0.0f, leverRest = 0.0f, leverFrac = 0.0f;
@@ -323,14 +333,15 @@ bool unsavedTune() {
          fabs(erpmCeiling - savedE) > 0.5f || fabs(deadbandN - savedB) > 1e-3f ||
          fabs(iRevMax - savedR) > 1e-4f || fabs(erpmRevCeil - savedV) > 0.5f ||
          fabs(leverSpan - savedG) > 0.5f ||
-         fabs(creepAmps - savedN) > 1e-4f || fabs(creepErpm - savedY) > 0.5f;
+         fabs(creepAmps - savedN) > 1e-4f || fabs(creepErpm - savedY) > 0.5f ||
+         useCell != savedU;
 }
 
 void sendParams() {
   char b[128];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f\n",
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f %d\n",
            gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
-           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm);
+           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm, useCell ? 1 : 0);
   bleQueue(b, strlen(b));
 }
 
@@ -350,6 +361,13 @@ void setState(ChairState s, const char *why) {
   armed = (s == ST_ARMED);
   if (!armed) cmdAmps = 0.0f;
   say(why);
+}
+
+// The load cell can only cause a fault while it is in use.
+void recheckFaults() {
+  if (useCell && !hxOk)          setState(ST_FAULT, "FAULT: HX711 not responding -- check 3V3, GND, D18, D19. (or 'u 0': push bar off)");
+  else if (useCell && !calValid) setState(ST_FAULT, "FAULT: no calibration in flash. send c <slope> <intercept>. (or 'u 0')");
+  else if (state == ST_FAULT)    setState(ST_WAIT_ESC, "fault cleared -- waiting for ESC.");
 }
 
 // One LED. steady = armed. slow blink = waiting / stopped.
@@ -569,6 +587,7 @@ void handleLine(String line, Source src) {
 
   if (c == 't') {
     if (armed) { say("disarm before taring -- a hand on the bar would become zero."); return; }
+    if (!useCell) { say("push bar is off -- nothing to tare. 'u 1' turns it on."); return; }
     if (state == ST_FAULT) { say("fault -- no tare."); return; }
     manualTare();
     // A tare never arms by itself. It only resets the zero; the normal
@@ -593,11 +612,26 @@ void handleLine(String line, Source src) {
       savedZeroValid = false;
       say("calibration saved: " + String(calSlope, 2) + " counts/N, intercept " + String(calIntercept, 1)
           + ". old zero forgotten -- tare next.");
-      if (state == ST_FAULT && hxOk) setState(ST_WAIT_ESC, "calibration present -- waiting for ESC.");
+      recheckFaults();
       sendParams();
     } else {
       say("usage:  c <slope> <intercept>   e.g. c 10980.85 0");
     }
+    return;
+  }
+
+  // push bar (load cell) on / off
+  if (c == 'u') {
+    if (arg != "0" && arg != "1") { say("usage:  u 0 (push bar off)   u 1 (push bar on)"); return; }
+    bool on = (arg == "1");
+    if (on != useCell) {
+      useCell = on;
+      say(on ? "push bar ON -- it will tare before arming. hands off."
+             : "push bar OFF -- no zeroing; the chair arms when the ESC answers.");
+      // Re-run the arming sequence under the new rule. A STOP stays latched.
+      if (state != ST_STOPPED) { if (state != ST_FAULT) setState(ST_WAIT_ESC, "re-arming..."); recheckFaults(); }
+    }
+    sendParams();
     return;
   }
 
@@ -659,10 +693,11 @@ void handleLine(String line, Source src) {
     prefs.putFloat("e", erpmCeiling); prefs.putFloat("b", deadbandN);
     prefs.putFloat("r", iRevMax); prefs.putFloat("v", erpmRevCeil); prefs.putFloat("g", leverSpan);
     prefs.putFloat("n", creepAmps); prefs.putFloat("y", creepErpm);
+    prefs.putBool("u", useCell);
     prefs.putBool("valid", true);
     prefs.end();
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
-    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm;
+    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm; savedU = useCell;
     say("saved: gain " + String(gainAperN, 3) + "  max " + String(iMax, 2) + " A  ceiling "
         + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N  reverse "
         + String(iRevMax, 2) + " A / " + String(erpmRevCeil, 0) + " erpm. these load at switch-on.");
@@ -671,7 +706,7 @@ void handleLine(String line, Source src) {
   }
 
   if (c == 'p') { sendParams(); if (!phone) help(); return; }
-  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g n y f q w x t c p. arming is the ESC switch."); return; }
+  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g n y u f q w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");
 }
@@ -717,7 +752,9 @@ void setup() {
     creepAmps   = bounded("saved slow drive current", prefs.getFloat("n", DEF_CREEP_A), 0.2f, I_HARD_CAP);
     creepErpm   = bounded("saved slow drive speed", prefs.getFloat("y", DEF_CREEP_ERPM), 100.0f, CREEP_ERPM_HARD_MAX);
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
+    useCell     = prefs.getBool("u", DEF_USE_CELL);
     savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm;
+    savedU = useCell;
     Serial.println("# loaded saved tuning from flash.");
   } else {
     Serial.println("# no saved tuning -- using defaults.");
@@ -725,9 +762,9 @@ void setup() {
   prefs.end();
 
   state = ST_WAIT_ESC;
-  if (!hxOk)          setState(ST_FAULT, "FAULT: HX711 not responding -- check 3V3, GND, D18, D19.");
-  else if (!calValid) setState(ST_FAULT, "FAULT: no calibration in flash. send c <slope> <intercept>.");
-  else { say("calibration " + String(calSlope, 1) + " counts/N. waiting for ESC..."); }
+  recheckFaults();
+  if (!useCell)              say("push bar OFF -- no zeroing. waiting for ESC...");
+  else if (state != ST_FAULT) say("calibration " + String(calSlope, 1) + " counts/N. waiting for ESC...");
   help();
 }
 
@@ -771,8 +808,13 @@ void loop() {
 
   // ---- the arming sequence ----
   if (state == ST_WAIT_ESC && escReplies >= ESC_OK_REPLIES) {
-    setState(ST_TARING, "ESC answering. taring -- hands off the bar.");
-    lastTareTry = 0;
+    if (useCell) {
+      setState(ST_TARING, "ESC answering. taring -- hands off the bar.");
+      lastTareTry = 0;
+    } else {
+      captureLeverRest();                 // the lever still takes its zero here
+      setState(ST_ARMED, "ARMED -- push bar off, no zeroing. slow drive and lever only.");
+    }
   }
   if ((state == ST_TARING || state == ST_HAND_ON_BAR) && millis() - lastTareTry >= TARE_RETRY_MS) {
     if (autoTare()) setState(ST_ARMED, "ARMED. push the bar.");
@@ -803,11 +845,12 @@ void loop() {
 
   float want = 0.0f;
   if (armed) {
-    if (forceN > deadbandN) {                          // PUSH
-      if (!rollingBack) want = (forceN - deadbandN) * gainAperN;
+    float barN = useCell ? forceN : 0.0f;              // bar off = it asks for nothing
+    if (barN > deadbandN) {                            // PUSH
+      if (!rollingBack) want = (barN - deadbandN) * gainAperN;
       if (want > iMax) want = iMax;                    // rolling back + push = nothing yet
-    } else if (forceN < -deadbandN && iRevMax > 0.0f) { // PULL
-      if (!rollingFwd) want = (forceN + deadbandN) * gainAperN;   // negative
+    } else if (barN < -deadbandN && iRevMax > 0.0f) {  // PULL
+      if (!rollingFwd) want = (barN + deadbandN) * gainAperN;     // negative
       if (want < -iRevMax) want = -iRevMax;            // rolling fwd + pull = nothing yet
     }
   }
