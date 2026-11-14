@@ -85,7 +85,7 @@
     a           arm                         USB only (bench override)
     x           STOP -- zero current, disarm, latch
     k <A/N>     gain, amps per newton      (default 0.10)
-    m <A>       max current                (default 1.5, hard cap 3.0)
+    m <A>       max current                (default 1.5, hard cap 10.0)
     e <erpm>    speed ceiling              (default 2000 = 4.1 km/h)
     b <N>       deadband in newtons        (default 4.0)
     r <A>       reverse max current        (default 0.8, hard cap 1.5, 0 = off)
@@ -142,7 +142,12 @@ const uint8_t COMM_SET_CURRENT = 6;
 
 // ---------------- limits ----------------
 // Nothing -- USB or phone -- may set a value outside these.
-const float I_HARD_CAP    = 3.0f;     // A. nothing may exceed this, ever
+// 11/14: raised from 3 A to 10 A -- 3 A would not start the chair with 100+ lb
+// of ballast. A ceiling for stepping up from the phone, not a setting to run at.
+// Still under the ESC's own motor limit (12 A in mk5-config-10-21-26-2b).
+// Nothing here watches motor temperature, and heat goes with current squared:
+// 10 A is ~11x the heat of 3 A. Above ~6 A: short holds, hand on the motor.
+const float I_HARD_CAP    = 10.0f;    // A. nothing may exceed this, ever
 const float GAIN_HARD_MAX = 0.50f;    // A/N. 6 N over deadband already hits 3 A
 const float ERPM_HARD_MAX = 2900.0f;  // ~6.0 km/h, top of the planned taper
 const float DEADBAND_MIN  = 2.0f;     // N. a resting hand must not drive
