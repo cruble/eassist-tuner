@@ -19,6 +19,13 @@
   reads 0 = no help. If yours falls when pulled, swap the pot's outer wires.
   No pot found at switch-on (reads near 0 V) -> lever ignored until next one.
 
+  BOOST (11/14): a second hold button on the phone. Slow drive only creeps --
+  it fades out at 0.6 km/h -- so it cannot show what assist feels like at a
+  walk. Boost gives a constant current while held, all the way up to the
+  normal speed ceiling, fading out over the last fifth of it. Same rules as
+  slow drive: armed only, forward only, two signals to start, stops 0.8 s
+  after the last signal, 60 s at most. Its current ('i') never exceeds max.
+
   PUSH BAR ON/OFF (11/13): 'u 0' turns the load cell off. The chair then
   needs no zero: it arms as soon as the ESC answers, ignores the bar
   entirely, and a missing amplifier or calibration is not a fault. Slow
@@ -96,6 +103,8 @@
     n <A>       slow drive current         (default 1.0, never above max current)
     y <erpm>    slow drive speed limit     (default 300 = 0.6 km/h, max 1000)
     u <0|1>     push bar (load cell) off / on   (default 0 = off, no zeroing)
+    o           boost: keep going (send repeatedly, like f)
+    i <A>       boost current              (default 3.0, never above max current)
     c <s> <i>   calibration slope/intercept, saved to flash   (disarmed only)
     t           tare now and accept it as the new zero        (disarmed only)
                 -- the way out when the mount changed and auto-tare keeps refusing
@@ -103,14 +112,14 @@
     j <A> <s>   DEMO: drive forward at <A> amps for <s> seconds (max 5 s).
                 USB only, armed only. Capped by max current, speed ceiling
                 and ramp like everything else. x / phone STOP / ESC off end it.
-    w           save k m e b r v g n y u to flash -- the values it starts with next time
+    w           save k m e b r v g n y u i to flash -- the values it starts with next time
     p           report parameters
     h           help
 
   PHONE PROTOCOL  (text lines, '\n' terminated, sent in 20-byte notifications)
     L <iCap> <kMax> <eMax> <bMin> <rCap> <vMax>          hard limits
-    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g> <n> <y> <u>   parameters
-    T <armed> <F N> <I A> <erpm> <ceiling> <state> <lever %> <lever raw> <slow drive 0/1>   telemetry, 5 Hz
+    P <k> <m> <e> <b> <calValid 0/1> <slope> <inter> <unsaved 0/1> <r> <v> <g> <n> <y> <u> <i>   parameters
+    T <armed> <F N> <I A> <erpm> <ceiling> <state> <lever %> <lever raw> <phone drive: 0 none, 1 slow drive, 2 boost>   telemetry, 5 Hz
                                          (lever % is -1 when no lever was found)
         state: F fault  W waiting for ESC  Z taring  H hand on bar
                A armed  S stopped (cycle power)
@@ -231,6 +240,10 @@ const unsigned long CREEP_HEARTBEAT_MS = 800;    // no 'f' for this long -> stop
 const unsigned long CREEP_MAX_MS       = 30000;  // one hold never runs longer than this
 const float CREEP_ERPM_HARD_MAX        = 1000.0f; // ~2.1 km/h
 bool creepOn = false;
+int  driveMode = 0, primeMode = 0;               // 1 slow drive, 2 boost
+const unsigned long BOOST_MAX_MS       = 60000;  // one boost hold never runs longer than this
+const float DEF_BOOST_A = 3.0f;
+float boostAmps = DEF_BOOST_A, savedI = DEF_BOOST_A;
 unsigned long creepStart = 0, creepLast = 0, creepPrime = 0;
 const unsigned long CREEP_PRIME_MS = 600;        // the second 'f' must follow the first within this
 uint8_t rxBuf[512];
@@ -339,14 +352,14 @@ bool unsavedTune() {
          fabs(iRevMax - savedR) > 1e-4f || fabs(erpmRevCeil - savedV) > 0.5f ||
          fabs(leverSpan - savedG) > 0.5f ||
          fabs(creepAmps - savedN) > 1e-4f || fabs(creepErpm - savedY) > 0.5f ||
-         useCell != savedU;
+         useCell != savedU || fabs(boostAmps - savedI) > 1e-4f;
 }
 
 void sendParams() {
   char b[128];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f %d\n",
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f %d %.2f\n",
            gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
-           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm, useCell ? 1 : 0);
+           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm, useCell ? 1 : 0, boostAmps);
   bleQueue(b, strlen(b));
 }
 
@@ -354,7 +367,7 @@ void sendTelemetry() {
   char b[80];
   snprintf(b, sizeof b, "T %d %.1f %.2f %ld %d %c %d %d %d\n",
            armed ? 1 : 0, forceN, cmdAmps, (long)lastErpm, ceilingHit ? 1 : 0, STATE_CODE[state],
-           leverPresent ? (int)(leverFrac * 100.0f + 0.5f) : -1, (int)leverRaw, creepOn ? 1 : 0);
+           leverPresent ? (int)(leverFrac * 100.0f + 0.5f) : -1, (int)leverRaw, creepOn ? driveMode : 0);
   bleQueue(b, strlen(b));
 }
 
@@ -640,20 +653,24 @@ void handleLine(String line, Source src) {
     return;
   }
 
-  // slow drive. 'f' both starts it and keeps it alive; silence stops it.
-  if (c == 'f') {
-    if (!armed) { if (!creepOn && millis() - creepLast > 2000) { creepLast = millis(); say("slow drive: not armed."); } return; }
+  // phone drive. 'f' = slow drive, 'o' = boost. Each both starts its mode and
+  // keeps it alive; silence stops it.
+  if (c == 'f' || c == 'o') {
+    int mode = (c == 'f') ? 1 : 2;
+    const char *name = (mode == 1) ? "slow drive" : "boost";
+    if (!armed) { if (!creepOn && millis() - creepLast > 2000) { creepLast = millis(); say(String(name) + ": not armed."); } return; }
+    if (creepOn && mode != driveMode) return;      // the other button is held: ignore
     if (!creepOn) {
-      // Starting takes two 'f' in a row. One stray, late 'f' (a stalled link
-      // delivering it after the thumb is off) must not start the chair.
-      if (creepPrime && millis() - creepPrime < CREEP_PRIME_MS) {
-        creepOn = true; creepStart = millis(); creepPrime = 0; say("slow drive ON.");
-      } else { creepPrime = millis(); return; }
+      // Starting takes two signals in a row, of the same kind. One stray, late
+      // one (a stalled link delivering it after the thumb is off) starts nothing.
+      if (creepPrime && primeMode == mode && millis() - creepPrime < CREEP_PRIME_MS) {
+        creepOn = true; driveMode = mode; creepStart = millis(); creepPrime = 0; say(String(name) + " ON.");
+      } else { creepPrime = millis(); primeMode = mode; return; }
     }
     creepLast = millis();
     return;
   }
-  if (c == 'q') { creepPrime = 0; if (creepOn) { creepOn = false; say("slow drive off (released)."); } return; }
+  if (c == 'q') { creepPrime = 0; if (creepOn) { creepOn = false; say("phone drive off (released)."); } return; }
 
   if (c == 'j') {
     if (phone)  { say("demo drive is USB only."); return; }
@@ -676,7 +693,7 @@ void handleLine(String line, Source src) {
     return;
   }
 
-  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v' || c == 'g' || c == 'n' || c == 'y') {
+  if (c == 'k' || c == 'm' || c == 'e' || c == 'b' || c == 'r' || c == 'v' || c == 'g' || c == 'n' || c == 'y' || c == 'i') {
     if (!hasNum) { say("? needs a number, e.g. k 0.10"); return; }
     if      (c == 'k') gainAperN   = bounded("gain",     v, 0.01f, GAIN_HARD_MAX);
     else if (c == 'm') iMax        = bounded("max amps", v, 0.10f, I_HARD_CAP);
@@ -687,6 +704,7 @@ void handleLine(String line, Source src) {
     else if (c == 'g') leverSpan   = bounded("lever span", v, 200.0f, 4000.0f);
     else if (c == 'n') creepAmps   = bounded("slow drive current", v, 0.2f, I_HARD_CAP);
     else if (c == 'y') creepErpm   = bounded("slow drive speed", v, 100.0f, CREEP_ERPM_HARD_MAX);
+    else if (c == 'i') boostAmps   = bounded("boost current", v, 0.2f, I_HARD_CAP);
     if (phone) { say(String("set ") + c + " " + arg); sendParams(); }
     else help();
     return;
@@ -698,11 +716,11 @@ void handleLine(String line, Source src) {
     prefs.putFloat("e", erpmCeiling); prefs.putFloat("b", deadbandN);
     prefs.putFloat("r", iRevMax); prefs.putFloat("v", erpmRevCeil); prefs.putFloat("g", leverSpan);
     prefs.putFloat("n", creepAmps); prefs.putFloat("y", creepErpm);
-    prefs.putBool("u", useCell);
+    prefs.putBool("u", useCell); prefs.putFloat("i", boostAmps);
     prefs.putBool("valid", true);
     prefs.end();
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
-    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm; savedU = useCell;
+    savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm; savedU = useCell; savedI = boostAmps;
     say("saved: gain " + String(gainAperN, 3) + "  max " + String(iMax, 2) + " A  ceiling "
         + String(erpmCeiling, 0) + " erpm  deadband " + String(deadbandN, 1) + " N  reverse "
         + String(iRevMax, 2) + " A / " + String(erpmRevCeil, 0) + " erpm. these load at switch-on.");
@@ -713,7 +731,7 @@ void handleLine(String line, Source src) {
   // limits go with every report: the copy sent at connect can be lost if
   // the phone has not finished subscribing yet.
   if (c == 'p') { sendLimits(); sendParams(); if (!phone) help(); return; }
-  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g n y u f q w x t c p. arming is the ESC switch."); return; }
+  if (c == 'h') { help(); if (phone) say("phone: k m e b r v g n y u i f o q w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");
 }
@@ -760,8 +778,9 @@ void setup() {
     creepErpm   = bounded("saved slow drive speed", prefs.getFloat("y", DEF_CREEP_ERPM), 100.0f, CREEP_ERPM_HARD_MAX);
     savedK = gainAperN; savedM = iMax; savedE = erpmCeiling; savedB = deadbandN;
     useCell     = prefs.getBool("u", DEF_USE_CELL);
+    boostAmps   = bounded("saved boost current", prefs.getFloat("i", DEF_BOOST_A), 0.2f, I_HARD_CAP);
     savedR = iRevMax; savedV = erpmRevCeil; savedG = leverSpan; savedN = creepAmps; savedY = creepErpm;
-    savedU = useCell;
+    savedU = useCell; savedI = boostAmps;
     Serial.println("# loaded saved tuning from flash.");
   } else {
     Serial.println("# no saved tuning -- using defaults.");
@@ -872,12 +891,20 @@ void loop() {
   if (creepOn) {
     unsigned long now = millis();
     if (!armed)                               { creepOn = false; }
-    else if (now - creepLast > CREEP_HEARTBEAT_MS) { creepOn = false; say("slow drive off -- lost the phone's signal."); }
-    else if (now - creepStart > CREEP_MAX_MS)      { creepOn = false; say("slow drive off -- 30 s limit."); }
+    else if (now - creepLast > CREEP_HEARTBEAT_MS) { creepOn = false; say("phone drive off -- lost the phone's signal."); }
+    else if (now - creepStart > (driveMode == 2 ? BOOST_MAX_MS : CREEP_MAX_MS)) { creepOn = false; say("phone drive off -- time limit."); }
     else {
-      float amps = creepAmps < iMax ? creepAmps : iMax;
-      // full current below half the speed limit, fading to nothing at the limit
-      float fade = (creepErpm - (float)lastErpm) / (0.5f * creepErpm);
+      float amps, fade;
+      if (driveMode == 2) {
+        // BOOST: constant push at walking pace. Full current up to 80% of the
+        // normal speed ceiling, fading to nothing at the ceiling.
+        amps = boostAmps < iMax ? boostAmps : iMax;
+        fade = (erpmCeiling - (float)lastErpm) / (0.2f * erpmCeiling);
+      } else {
+        // SLOW DRIVE: full current below half its speed limit, fading to nothing at the limit
+        amps = creepAmps < iMax ? creepAmps : iMax;
+        fade = (creepErpm - (float)lastErpm) / (0.5f * creepErpm);
+      }
       if (fade > 1.0f) fade = 1.0f;
       if (fade < 0.0f) fade = 0.0f;
       want = amps * fade;
