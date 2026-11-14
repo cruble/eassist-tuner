@@ -710,7 +710,9 @@ void handleLine(String line, Source src) {
     return;
   }
 
-  if (c == 'p') { sendParams(); if (!phone) help(); return; }
+  // limits go with every report: the copy sent at connect can be lost if
+  // the phone has not finished subscribing yet.
+  if (c == 'p') { sendLimits(); sendParams(); if (!phone) help(); return; }
   if (c == 'h') { help(); if (phone) say("phone: k m e b r v g n y u f q w x t c p. arming is the ESC switch."); return; }
 
   say("? try h");

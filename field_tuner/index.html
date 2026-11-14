@@ -192,7 +192,7 @@
 
   // Hard limits arrive from the firmware in the L line. These are only
   // placeholders until then; the firmware clamps regardless.
-  const limits = { iCap: 3.0, kMax: 0.5, eMax: 2900, bMin: 2.0, rCap: 1.5, vMax: 1000 };
+  const limits = { iCap: 10.0, kMax: 0.5, eMax: 2900, bMin: 2.0, rCap: 1.5, vMax: 1000 };   // matches assist_chair; the chair clamps regardless
   const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false, g: null, hasLever: false, n: null, y: null, hasCreep: false, u: null, hasCell: false };
   let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
 
