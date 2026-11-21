@@ -11,8 +11,12 @@
   ignored. The chair will not arm while the lever is squeezed -- LED double
   blink, same as a hand on the bar -- and arms as soon as it is let go.
   Response is linear: 8% dead zone, then 0..100% of squeeze = 0..max current.
-  The HX711 is only looked for while the push bar is on ('u 1'), so the
-  amplifier can be unplugged while the bar is off.
+  NO PUSH BAR IN THIS BUILD (HAS_CELL = false): the HX711 is never set up,
+  never read and never checked, whatever was saved before, and 'u 1' is
+  refused. The load cell code is still in the file, switched off; set
+  HAS_CELL true to get assist_chair's behaviour back.
+  The P line carries two extra fields at the end for the phone page
+  (field_tuner_lever): lever rest, and 1/0 for "range recorded".
   ESP32-WROOM-32  +  HX711 + bar load cell  <->  Flipsky Mini V6 MK5 (sensored)
                   +  Bluetooth Low Energy to a phone (field_tuner/index.html)
 
@@ -210,6 +214,7 @@ float creepErpm   = DEF_CREEP_ERPM;   // slow drive speed limit, 0.6 km/h
 float savedK = DEF_GAIN, savedM = DEF_IMAX, savedE = DEF_ERPM, savedB = DEF_DEADBAND;
 float savedR = DEF_IREV, savedV = DEF_EREV, savedG = DEF_SPAN;
 float savedN = DEF_CREEP_A, savedY = DEF_CREEP_ERPM;
+const bool HAS_CELL     = false;     // false = no load cell fitted: never set up, read or checked
 const bool DEF_USE_CELL = false;     // push bar off by default in this build
 bool  useCell = DEF_USE_CELL, savedU = DEF_USE_CELL;
 
@@ -369,10 +374,11 @@ bool unsavedTune() {
 }
 
 void sendParams() {
-  char b[128];
-  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f %d %.2f\n",
+  char b[176];
+  snprintf(b, sizeof b, "P %.3f %.2f %.0f %.1f %d %.2f %.1f %d %.2f %.0f %.0f %.2f %.0f %d %.2f %.0f %d\n",
            gainAperN, iMax, erpmCeiling, deadbandN, calValid ? 1 : 0, calSlope, calIntercept,
-           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm, useCell ? 1 : 0, boostAmps);
+           unsavedTune() ? 1 : 0, iRevMax, erpmRevCeil, leverSpan, creepAmps, creepErpm, useCell ? 1 : 0, boostAmps,
+           leverRest, leverPresent ? 1 : 0);
   bleQueue(b, strlen(b));
 }
 
@@ -664,6 +670,7 @@ void handleLine(String line, Source src) {
 
   // push bar (load cell) on / off
   if (c == 'u') {
+    if (!HAS_CELL) { say("this build has no push bar -- lever and phone drive only."); sendParams(); return; }
     if (arg != "0" && arg != "1") { say("usage:  u 0 (push bar off)   u 1 (push bar on)"); return; }
     bool on = (arg == "1");
     if (on != useCell) {
@@ -813,7 +820,7 @@ void setup() {
   bleBegin();
   Serial.println("# BLE advertising as \"eAssist\"");
 
-  scale.begin(PIN_DT, PIN_SCK);          // probed further down, and only if the push bar is on
+  if (HAS_CELL) scale.begin(PIN_DT, PIN_SCK);   // probed further down, and only if the push bar is on
   leverRaw = readLeverNow();             // start the filter where the lever is, not at 0
 
   prefs.begin("handle", true);
@@ -856,6 +863,7 @@ void setup() {
   }
   prefs.end();
 
+  if (!HAS_CELL) { useCell = false; savedU = false; }   // a saved "push bar on" means nothing here
   if (useCell) probeHx();
 
   state = ST_WAIT_ESC;

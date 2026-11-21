@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f4f2ee">
+<title>eAssist Lever Tuner</title>
+<!--
+  eAssist lever tuner — talks to assist_lever.ino over Bluetooth Low Energy.
+  Lever-only version of field_tuner: no push bar, no load cell, no tare.
+  Open in Chrome on Android, served over https (e.g. GitHub Pages).
+  The phone can tune, stop, and record the lever's range. It cannot arm.
+  Every limit lives in the firmware; the slider ranges here just mirror them.
+-->
+<style>
+  :root{
+    --bg:#f4f2ee; --card:#ffffff; --ink:#15171a; --muted:#5d636b; --line:#d9d6cf;
+    --accent:#1f5fbf; --ok:#1d7a3e; --warn:#b26b00; --stop:#c62828; --stopdark:#8e1b1b;
+    --pending:#b26b00;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#111315; --card:#1b1e21; --ink:#f1f1ef; --muted:#9aa1a9; --line:#30353a;
+      --accent:#6aa3ff; --ok:#4cc77a; --warn:#f2a93b; --stop:#e53935; --stopdark:#b71c1c; --pending:#f2a93b; }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+  main{max-width:560px;margin:0 auto;padding:12px 16px 120px}
+  header{display:flex;align-items:center;gap:10px;margin:4px 0 12px}
+  h1{font-size:18px;margin:0;flex:1;letter-spacing:.02em}
+  h1 small{display:block;font-size:12px;font-weight:500;color:var(--muted);letter-spacing:0}
+  button{font:inherit;border:0;border-radius:12px;cursor:pointer;touch-action:manipulation}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .btn{background:var(--accent);color:#fff;padding:10px 16px;font-weight:600}
+  .btn.ghost{background:transparent;color:var(--ink);border:1.5px solid var(--line)}
+  .pill{font-size:13px;font-weight:600;padding:4px 10px;border-radius:999px;border:1.5px solid var(--line);color:var(--muted);white-space:nowrap}
+  .pill.on{color:var(--ok);border-color:var(--ok)}
+  .pill.retry{color:var(--warn);border-color:var(--warn)}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
+  .state{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+  .state .big{flex:1;font-size:22px;font-weight:800;letter-spacing:.06em;padding:10px 14px;border-radius:12px;text-align:center;
+    background:var(--card);border:2px solid var(--line);color:var(--muted)}
+  .state .big.armed{background:var(--ok);border-color:var(--ok);color:#fff}
+  .state .ceil{font-size:13px;font-weight:800;letter-spacing:.06em;padding:12px;border-radius:12px;border:2px solid var(--line);color:var(--muted)}
+  .state .ceil.hit{background:var(--warn);border-color:var(--warn);color:#fff}
+
+  .live{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .live > div{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 10px 8px}
+  .live label{display:block;font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+  .live output{display:block;font-size:30px;font-weight:750;font-variant-numeric:tabular-nums;line-height:1.1;margin-top:2px}
+  .live span{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .meter{height:6px;border-radius:3px;background:var(--line);margin-top:6px;overflow:hidden}
+  .meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+  .stale .live output{color:var(--muted)}
+  .statenote{font-size:15px;font-weight:600;margin:-4px 2px 12px;min-height:20px}
+  .statenote.warn{color:var(--warn)} .statenote.bad{color:var(--stop)}
+  .state .big.fault{background:var(--stop);border-color:var(--stop);color:#fff}
+  .state .big.hand{border-color:var(--warn);color:var(--warn)}
+  .celloff .live > div:first-child output{color:var(--muted)}
+  .celloff .live > div:first-child label::after{content:' · bar off'}
+  .levernote{font-size:14px;color:var(--muted);margin:6px 2px 0;font-variant-numeric:tabular-nums;min-height:18px}
+  .levernote b{color:var(--ink)}
+  .stalenote{display:none;font-size:13px;color:var(--warn);margin:6px 2px 0;font-weight:600}
+  .stale .stalenote{display:block}
+
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:20px 2px 8px}
+  .tune .row{display:flex;align-items:baseline;gap:8px}
+  .tune .name{flex:1;font-weight:650}
+  .tune .name small{display:block;font-weight:400;font-size:13px;color:var(--muted)}
+  .tune .val{font-size:24px;font-weight:750;font-variant-numeric:tabular-nums}
+  .tune .unit{font-size:14px;color:var(--muted)}
+  .tune .pend.on{color:var(--pending)}
+  .tune .pend{font-size:12px;color:var(--muted);font-weight:700;min-height:16px;text-align:right}
+  .ctl{display:flex;align-items:center;gap:10px;margin-top:6px}
+  .ctl button{width:48px;height:48px;font-size:24px;font-weight:700;background:var(--bg);color:var(--ink);border:1.5px solid var(--line)}
+  input[type=range]{flex:1;height:48px;accent-color:var(--accent);margin:0}
+  .range{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:0 58px}
+
+  .gobtn{display:block;width:100%;height:96px;font-size:22px;font-weight:900;letter-spacing:.08em;color:#fff;
+    background:var(--ok);box-shadow:0 4px 0 rgba(0,0,0,.25);
+    user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:none}
+  .gobtn.held{transform:translateY(3px);box-shadow:0 1px 0 rgba(0,0,0,.25);filter:brightness(1.15)}
+  .gobtn.driving{background:var(--warn)}
+  .gobtn.boostbtn{background:var(--accent)}
+  .gobtn.boostbtn.driving{background:var(--warn)}
+  .savecard .btn{width:100%;padding:14px}
+  .savecard.dirty{border-color:var(--pending)}
+  .savecard.dirty #savehint{color:var(--pending);font-weight:600}
+  .tools{display:flex;gap:10px}
+  .tools .btn{flex:1;padding:14px}
+  details summary{cursor:pointer;font-weight:650;padding:2px 0}
+  .cal{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  .cal label{font-size:13px;color:var(--muted)}
+  .cal input{width:100%;font:inherit;font-size:18px;padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink)}
+  .cal .full{grid-column:1/-1}
+  .hint{font-size:13px;color:var(--muted);margin:8px 2px 0}
+
+  #log{font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;max-height:180px;overflow:auto;white-space:pre-wrap;color:var(--muted);margin:0}
+  #log .me{color:var(--accent)}
+
+  .stopbar{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top,var(--bg) 70%,transparent)}
+  #stop{display:block;width:100%;max-width:528px;margin:0 auto;height:72px;font-size:26px;font-weight:900;letter-spacing:.12em;
+    background:var(--stop);color:#fff;box-shadow:0 4px 0 var(--stopdark)}
+  #stop:active{transform:translateY(3px);box-shadow:0 1px 0 var(--stopdark)}
+
+  .nobt{display:none;border-color:var(--warn)}
+  .nobt.show{display:block}
+</style>
+</head>
+<body>
+<main id="app" class="stale">
+  <header>
+    <h1>eAssist lever tuner<small>phone tunes · the ESC switch arms</small></h1>
+    <span id="pill" class="pill">offline</span>
+    <button id="connect" class="btn">Connect</button>
+  </header>
+
+  <div id="nobt" class="card nobt">
+    <strong>Bluetooth isn't available in this browser.</strong>
+    <div class="hint">Open this page in Chrome on Android, from an https address (GitHub Pages works). Make sure Bluetooth and Location are on.</div>
+  </div>
+
+  <div class="state">
+    <div id="armed" class="big">DISARMED</div>
+    <div id="ceil" class="ceil">CEILING</div>
+  </div>
+  <div class="statenote" id="statenote"></div>
+
+  <div class="live">
+    <div><label>Lever</label><output id="f">—</output><span>% squeezed</span></div>
+    <div><label>Current</label><output id="i">—</output><span id="iof">A</span><div class="meter"><i id="imeter"></i></div></div>
+    <div><label>Speed</label><output id="v">—</output><span id="erpm">km/h</span></div>
+  </div>
+  <div class="levernote" id="levernote"></div>
+  <div class="stalenote" id="stalenote">No live data — readings are old.</div>
+
+  <h2>Lever range</h2>
+  <div class="card">
+    <div class="tools">
+      <button id="setrest" class="btn ghost">Set RELEASED</button>
+      <button id="setfull" class="btn ghost">Set SQUEEZED</button>
+    </div>
+    <div class="hint" id="rangestate"></div>
+    <div class="hint" id="rangehint">ESC switch off first. Let go of the lever and tap Set RELEASED. Then squeeze it fully, hold, and tap Set SQUEEZED. Each is saved on the chair at once.</div>
+  </div>
+
+  <div id="creepsec" style="display:none">
+    <h2>Drive from the phone</h2>
+    <div class="card" id="boostcard" style="display:none">
+      <button id="boost" class="gobtn boostbtn" disabled>HOLD TO BOOST</button>
+      <div class="hint" id="boosthint">Hold for a steady push at walking pace. Let go to stop.</div>
+    </div>
+    <div id="boosthost"></div>
+    <div class="card">
+      <button id="go" class="gobtn" disabled>HOLD TO CREEP</button>
+      <div class="hint" id="gohint">Hold to creep forward. Let go to stop. Works only while armed.</div>
+    </div>
+    <div id="creephost"></div>
+  </div>
+
+  <h2>Tuning</h2>
+  <div id="tunables"></div>
+  <div class="card savecard">
+    <button id="save" class="btn">Save as switch-on settings</button>
+    <div class="hint" id="savehint">Changes work immediately. Save makes them the settings the chair starts with.</div>
+  </div>
+
+  <h2>Messages</h2>
+  <div class="card"><pre id="log"></pre></div>
+</main>
+
+<div class="stopbar"><button id="stop" disabled>STOP</button></div>
+
+<script>
+(() => {
+  const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // we write here
+  const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // chair notifies here
+  const ERPM_PER_KMH = 482;                             // same as the firmware
+
+  const $ = id => document.getElementById(id);
+  const enc = new TextEncoder(), dec = new TextDecoder();
+
+  // Hard limits arrive from the firmware in the L line. These are only
+  // placeholders until then; the firmware clamps regardless.
+  const limits = { iCap: 10.0, kMax: 0.5, eMax: 2900, bMin: 2.0, rCap: 1.5, vMax: 1000 };   // matches assist_chair; the chair clamps regardless
+  const P = { k: null, m: null, e: null, b: null, cal: null, slope: null, inter: null, unsaved: false, r: null, v: null, hasRev: false, g: null, hasLever: false, n: null, y: null, hasCreep: false, u: null, hasCell: false, i: null, hasBoost: false,
+              rest: null, levCal: null, hasRange: false };   // lever range: assist_lever.ino only
+  let armed = false, lastT = 0, device = null, rxChar = null, userClosed = false, retryTimer = null;
+
+  // ---------------------------------------------------------------- tunables
+  const defs = [
+    { key:'m', name:'Max current', sub:'what a full squeeze gives · the lever runs 0 to this, in a straight line', unit:'A', step:0.1, dp:1,
+      min:()=>0.1,  max:()=>limits.iCap },
+    { key:'e', name:'Speed ceiling', sub:'assist cuts out above this',    unit:'km/h', step:50,  dp:0,
+      min:()=>200,  max:()=>limits.eMax, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm` },
+    { key:'g', name:'Lever span', sub:'set by Set SQUEEZED · lower it to reach full help before the end of the squeeze', unit:'counts', step:50, dp:0,
+      min:()=>200, max:()=>4000, lever:true },
+    { key:'y', name:'Slow drive speed', sub:'the creep never goes faster than this', unit:'km/h', step:50, dp:0,
+      min:()=>100, max:()=>1000, show:v=>(v/ERPM_PER_KMH).toFixed(1), extra:v=>`${Math.round(v)} erpm`, creep:true },
+    { key:'n', name:'Slow drive current', sub:'how hard it pushes · raise if the chair will not start moving', unit:'A', step:0.1, dp:1,
+      min:()=>0.2, max:()=>limits.iCap, creep:true },
+    { key:'i', name:'Boost current', sub:'how hard boost pushes · never more than Max current', unit:'A', step:0.5, dp:1,
+      min:()=>0.5, max:()=>limits.iCap, boost:true },
+  ];
+  const ui = {};
+  const host = $('tunables');
+  for (const d of defs) {
+    const el = document.createElement('div');
+    el.className = 'card tune';
+    el.innerHTML = `
+      <div class="row">
+        <div class="name">${d.name}<small>${d.sub}</small></div>
+        <div><span class="val">—</span> <span class="unit">${d.unit}</span></div>
+      </div>
+      <div class="pend"></div>
+      <div class="ctl">
+        <button aria-label="less">−</button>
+        <input type="range">
+        <button aria-label="more">+</button>
+      </div>
+      <div class="range"><span class="lo"></span><span class="hi"></span></div>`;
+    (d.boost ? $('boosthost') : d.creep ? $('creephost') : host).appendChild(el);
+    const [minus, plus] = el.querySelectorAll('.ctl button');
+    const r = el.querySelector('input');
+    const u = ui[d.key] = { d, el, r, minus, plus, val: el.querySelector('.val'),
+                            pend: el.querySelector('.pend'), lo: el.querySelector('.lo'), hi: el.querySelector('.hi'),
+                            pending: null, timer: null };
+    r.addEventListener('input', () => showPending(u, +r.value));
+    r.addEventListener('change', () => queueSet(u, +r.value, 250));
+    minus.addEventListener('click', () => nudge(u, -1));
+    plus .addEventListener('click', () => nudge(u, +1));
+  }
+  function fmt(d, v){ return d.show ? d.show(v) : (+v).toFixed(d.dp); }
+  function applyRanges(){
+    for (const u of Object.values(ui)) {
+      u.r.min = u.d.min(); u.r.max = u.d.max(); u.r.step = u.d.step;
+      u.lo.textContent = fmt(u.d, u.d.min()); u.hi.textContent = fmt(u.d, u.d.max());
+    }
+  }
+  function showPending(u, v){
+    u.pending = v;
+    u.pend.classList.add('on');
+    u.pend.textContent = `→ ${fmt(u.d, v)} ${u.d.unit}${u.d.extra ? ' · ' + u.d.extra(v) : ''} · sending…`;
+  }
+  function nudge(u, dir){
+    const base = u.pending ?? P[u.d.key];
+    if (base == null) return;
+    let v = Math.round((base + dir * u.d.step) / u.d.step) * u.d.step;
+    v = Math.min(u.d.max(), Math.max(u.d.min(), +v.toFixed(4)));
+    u.r.value = v; queueSet(u, v, 350);    // short wait so repeated taps send once
+  }
+  function queueSet(u, v, wait){
+    showPending(u, v);
+    clearTimeout(u.timer);
+    u.timer = setTimeout(() => send(`${u.d.key} ${(+v).toFixed(u.d.key==='e'?0:3)}`), wait);
+  }
+  // The firmware's echo (P line) is the only truth shown as the value.
+  function renderParams(){
+    for (const u of Object.values(ui)) {
+      if (u.d.rev) u.el.style.display = P.hasRev ? '' : 'none';   // older firmware: no reverse
+      if (u.d.lever) u.el.style.display = P.hasLever ? '' : 'none';
+      if (u.d.creep) $('creepsec').style.display = P.hasCreep ? '' : 'none';
+      if (u.d.boost) { u.el.style.display = P.hasBoost ? '' : 'none'; $('boostcard').style.display = P.hasBoost ? '' : 'none'; }
+      const v = P[u.d.key];
+      if (v == null) continue;
+      u.val.textContent = fmt(u.d, v);
+      if (u.pending != null && Math.abs(u.pending - v) < u.d.step / 2) { u.pending = null; }
+      if (u.pending == null) { u.pend.classList.remove('on'); u.r.value = v; u.pend.textContent = u.d.extra ? u.d.extra(v) : ''; }
+    }
+    renderSave();
+    renderRange();
+  }
+
+  // ---------------------------------------------------------------- lever range
+  // Rest and "range recorded" arrive at the end of the P line (assist_lever.ino).
+  function renderRange(){
+    const s = $('rangestate');
+    if (!P.hasRange) { s.textContent = P.k == null ? '' : 'This firmware does not keep a lever range. Flash assist_lever.'; s.className = 'hint'; return; }
+    if (P.levCal) { s.innerHTML = `Recorded: released <b>${Math.round(P.rest)}</b> → squeezed <b>${Math.round(P.rest + P.g)}</b> (span ${Math.round(P.g)})`; }
+    else          { s.innerHTML = '<b>Not recorded yet</b> — the lever does nothing until both are set.'; }
+  }
+
+  // ---------------------------------------------------------------- save
+  // The firmware says whether live settings differ from saved ones (last field
+  // of P). Old firmware does not send it, and cannot save at all.
+  let savedVals = null, savedAt = null;
+  const fmtSet = v => `max ${v.m.toFixed(1)} A · ceiling ${(v.e/ERPM_PER_KMH).toFixed(1)} km/h`
+    + (v.g != null ? ` · lever span ${Math.round(v.g)}` : '');
+  function renderSave(){
+    const btn = $('save'), hint = $('savehint'), card = btn.closest('.card');
+    if (P.k == null) return;
+    if (!P.canSave) {
+      card.classList.add('dirty'); btn.disabled = true; btn.textContent = 'Save not available';
+      hint.textContent = 'This firmware cannot save. Flash assist_lever.';
+      return;
+    }
+    if (!P.unsaved) savedVals = { k:P.k, m:P.m, e:P.e, b:P.b, r:P.r, v:P.v, g:P.g, n:P.n, y:P.y, u:P.u, i:P.i };
+    card.classList.toggle('dirty', P.unsaved);
+    btn.disabled = !rxChar || !P.unsaved;
+    if (P.unsaved) {
+      btn.textContent = 'Save as switch-on settings';
+      let what = '';
+      if (savedVals) {
+        const ch = [];
+        if (Math.abs(P.m - savedVals.m) > 1e-4) ch.push(`max ${savedVals.m.toFixed(1)} → ${P.m.toFixed(1)} A`);
+        if (Math.abs(P.e - savedVals.e) > 0.5)  ch.push(`ceiling ${(savedVals.e/ERPM_PER_KMH).toFixed(1)} → ${(P.e/ERPM_PER_KMH).toFixed(1)} km/h`);
+        if (P.i != null && savedVals.i != null && Math.abs(P.i - savedVals.i) > 1e-4) ch.push(`boost ${savedVals.i.toFixed(1)} → ${P.i.toFixed(1)} A`);
+        if (P.n != null && savedVals.n != null && Math.abs(P.n - savedVals.n) > 1e-4) ch.push(`slow drive ${savedVals.n.toFixed(1)} → ${P.n.toFixed(1)} A`);
+        if (P.y != null && savedVals.y != null && Math.abs(P.y - savedVals.y) > 0.5) ch.push(`slow drive speed ${(savedVals.y/ERPM_PER_KMH).toFixed(1)} → ${(P.y/ERPM_PER_KMH).toFixed(1)} km/h`);
+        if (P.g != null && savedVals.g != null && Math.abs(P.g - savedVals.g) > 0.5) ch.push(`lever span ${savedVals.g} → ${P.g}`);
+        what = ch.join(' · ');
+      }
+      hint.textContent = 'Unsaved — lost if the ESP32 loses power.' + (what ? ' Changed: ' + what : '');
+    } else {
+      btn.textContent = 'Nothing to save';
+      hint.textContent = (savedAt ? `Saved ${savedAt}. ` : 'Saved. ') + 'Switch-on settings: ' + fmtSet(P);
+    }
+  }
+
+  // ---------------------------------------------------------------- live
+  // Chair states, from the T line (assist_lever.ino). F and Z belong to the
+  // push bar and should never appear with this firmware.
+  const STATES = {
+    F: { big:'FAULT',      cls:'fault', tone:'bad',  note:'Fault. This should not happen on the lever firmware — check the Messages below.' },
+    W: { big:'WAITING',    cls:'',      tone:'',     note:'Waiting for the ESC to answer. Is its switch on? The lever range can be set now.' },
+    Z: { big:'TARING',     cls:'',      tone:'',     note:'Taring.' },
+    H: { big:'LET GO',     cls:'hand',  tone:'warn', note:'Not armed: the lever is squeezed. Let go and it arms. If it is already released, switch the ESC off and tap Set RELEASED.' },
+    A: { big:'ARMED',      cls:'armed', tone:'',     note:'' },   // note filled in below
+    S: { big:'STOPPED',    cls:'',      tone:'warn', note:'Stopped. Cycle the ESC switch to re-arm — the phone cannot.' },
+  };
+  function renderTele(t){
+    armed = t.armed;
+    const S = STATES[t.state] || (armed ? STATES.A : { big:'DISARMED', note:'' });
+    const a = $('armed'); a.textContent = S.big;
+    a.className = 'big ' + (S.cls || '');
+    const n = $('statenote');
+    n.textContent = t.state !== 'A' ? S.note
+      : (t.lever != null && t.lever < 0) ? 'Armed, but the lever range is not recorded — only the phone can drive.'
+      : 'Squeeze the lever to drive.';
+    n.className = 'statenote ' + (S.tone || '');
+    $('ceil').classList.toggle('hit', t.ceil);
+    $('f').textContent = (t.lever == null || t.lever < 0) ? '—' : t.lever;
+    $('i').textContent = t.I.toFixed(2);
+    const iMax = P.m || limits.iCap;
+    const rev = t.I < 0, cap = rev ? (P.r || limits.rCap) : iMax;
+    $('iof').textContent = rev ? `A reverse · of ${cap.toFixed(1)}` : `A of ${iMax.toFixed(1)}`;
+    $('imeter').style.width = Math.min(100, 100 * Math.abs(t.I) / (cap || 1)) + '%';
+    $('imeter').style.background = rev ? 'var(--warn)' : 'var(--accent)';
+    $('v').textContent = (t.erpm / ERPM_PER_KMH).toFixed(1);
+    $('levernote').innerHTML = t.lever == null ? ''
+      : t.lever < 0 ? `Lever range not recorded · reading now <b>${t.leverRaw}</b>`
+      : `Lever reading now <b>${t.leverRaw}</b>`;
+    $('erpm').textContent = `km/h · ${t.erpm} erpm`;
+    renderGo(t.creep);
+    $('setrest').disabled = $('setfull').disabled = armed || !rxChar;
+    $('rangehint').textContent = armed
+      ? 'Armed — switch the ESC off (or tap STOP) before setting the range. The lever is live while armed.'
+      : 'ESC switch off first. Let go of the lever and tap Set RELEASED. Then squeeze it fully, hold, and tap Set SQUEEZED. Each is saved on the chair at once.';
+  }
+  setInterval(() => $('app').classList.toggle('stale', !rxChar || Date.now() - lastT > 1000), 250);
+
+  // ---------------------------------------------------------------- lines in
+  let inbuf = '';
+  function onNotify(e){
+    inbuf += dec.decode(e.target.value, { stream: true });
+    let nl;
+    while ((nl = inbuf.indexOf('\n')) >= 0) {
+      const line = inbuf.slice(0, nl).trim(); inbuf = inbuf.slice(nl + 1);
+      if (line) handleLine(line);
+    }
+    if (inbuf.length > 2000) inbuf = '';
+  }
+  function handleLine(line){
+    const p = line.split(/\s+/);
+    if (p[0] === 'T' && p.length >= 6) {
+      lastT = Date.now();
+      renderTele({ armed: p[1] === '1', F: +p[2], I: +p[3], erpm: +p[4], ceil: p[5] === '1', state: p[6],
+                   lever: p.length >= 9 ? +p[7] : null, leverRaw: p.length >= 9 ? +p[8] : null, creep: +p[9] || 0 });
+    } else if (p[0] === 'P' && p.length >= 8) {
+      Object.assign(P, { k:+p[1], m:+p[2], e:+p[3], b:+p[4], cal:p[5]==='1', slope:+p[6], inter:+p[7], unsaved: p[8]==='1', canSave: p.length >= 9, hasRev: p.length >= 11, r: p.length >= 11 ? +p[9] : null, v: p.length >= 11 ? +p[10] : null, hasLever: p.length >= 12, g: p.length >= 12 ? +p[11] : null,
+                         hasCreep: p.length >= 14, n: p.length >= 14 ? +p[12] : null, y: p.length >= 14 ? +p[13] : null,
+                         hasCell: p.length >= 15, u: p.length >= 15 ? p[14] === '1' : null,
+                         hasBoost: p.length >= 16, i: p.length >= 16 ? +p[15] : null,
+                         hasRange: p.length >= 18, rest: p.length >= 18 ? +p[16] : null, levCal: p.length >= 18 ? p[17] === '1' : null });
+      renderParams();
+    } else if (p[0] === 'L' && p.length >= 5) {
+      Object.assign(limits, { iCap:+p[1], kMax:+p[2], eMax:+p[3], bMin:+p[4] });
+      if (p.length >= 7) Object.assign(limits, { rCap:+p[5], vMax:+p[6] });
+      applyRanges(); renderParams();
+    } else if (line.startsWith('#')) {
+      const msg = line.slice(1).trim();
+      if (msg.startsWith('saved:')) { savedAt = new Date().toTimeString().slice(0, 5); }
+      log(msg);
+    }
+  }
+
+  // ---------------------------------------------------------------- lines out
+  // GATT allows one operation at a time, so writes go through a chain.
+  let chain = Promise.resolve();
+  function send(cmd){
+    if (!rxChar) { log('not connected — "' + cmd + '" not sent'); return Promise.resolve(); }
+    log('› ' + cmd, true);
+    const ch = rxChar;
+    chain = chain.then(() => ch.writeValue(enc.encode(cmd + '\n')))
+                 .catch(err => log('send failed: ' + err.message));
+    return chain;
+  }
+
+  // ---------------------------------------------------------------- connection
+  function setPill(text, cls){ const p = $('pill'); p.textContent = text; p.className = 'pill ' + (cls || ''); }
+  function setConnected(on){
+    $('stop').disabled = !on;
+    $('connect').textContent = on ? 'Disconnect' : 'Connect';
+    $('setrest').disabled = $('setfull').disabled = !on || armed;
+    renderSave(); if (!on) $('save').disabled = true;
+    if (!on) { $('go').disabled = true; $('boost').disabled = true; }
+    for (const u of Object.values(ui)) { u.r.disabled = u.minus.disabled = u.plus.disabled = !on; }
+  }
+
+  async function attach(){
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    const tx = await svc.getCharacteristic(TX);
+    rxChar = await svc.getCharacteristic(RX);
+    tx.addEventListener('characteristicvaluechanged', onNotify);
+    await tx.startNotifications();
+    chain = Promise.resolve(); inbuf = '';
+    setPill('connected', 'on'); setConnected(true);
+    send('p');
+  }
+
+  async function connect(){
+    if (!navigator.bluetooth) { $('nobt').classList.add('show'); return; }
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS] }, { namePrefix: 'eAssist' }],
+        optionalServices: [NUS],
+      });
+      device.addEventListener('gattserverdisconnected', onDrop);
+      userClosed = false;
+      setPill('connecting…', 'retry');
+      await attach();
+    } catch (err) {
+      if (err.name !== 'NotFoundError') log('connect failed: ' + err.message);   // NotFound = user cancelled
+      setPill('offline');
+    }
+  }
+
+  function onDrop(){
+    dropHold();
+    rxChar = null; setConnected(false);
+    if (userClosed) { setPill('offline'); return; }
+    log('link lost — chair keeps its settings. retrying…');
+    setPill('reconnecting…', 'retry');
+    const retry = async (n) => {
+      if (userClosed || !device) return;
+      try { await attach(); log('reconnected'); }
+      catch { retryTimer = setTimeout(() => retry(n + 1), Math.min(5000, 1000 + n * 500)); }
+    };
+    retry(0);
+  }
+
+  $('connect').addEventListener('click', () => {
+    if (device && device.gatt.connected) { userClosed = true; clearTimeout(retryTimer); device.gatt.disconnect(); }
+    else if (device && !userClosed && retryTimer) { userClosed = true; clearTimeout(retryTimer); setPill('offline'); }
+    else connect();
+  });
+
+  // ---------------------------------------------------------------- phone drive
+  // Two hold buttons: creep ('f', slow drive) and boost ('o'). While one is held
+  // its letter goes out 4 times a second; the chair stops by itself 0.8 s after
+  // the last one. Nothing is queued: a late signal is never sent after the
+  // thumb is off. Only one button can be held at a time.
+  const HOLDS = {
+    go:    { beat:'f', mode:1, idle:'HOLD TO CREEP', name:'creep',
+             hint:'Hold to creep forward. Let go to stop. Stops by itself if the phone loses the chair, and after 30 s.' },
+    boost: { beat:'o', mode:2, idle:'HOLD TO BOOST', name:'boost',
+             hint:'Hold for a steady push at walking pace, up to the speed ceiling. Let go to stop. Stops by itself if the phone loses the chair, and after 60 s.' },
+  };
+  let held = null, goTimer = null, beatBusy = false;      // held = 'go' | 'boost' | null
+  function beat(){
+    if (!held || !rxChar || beatBusy) return;
+    beatBusy = true;
+    const ch = rxChar, which = held, data = enc.encode(HOLDS[which].beat + '\n');
+    chain = chain.then(() => held === which ? (ch.writeValueWithoutResponse ? ch.writeValueWithoutResponse(data) : ch.writeValue(data)) : null)
+                 .catch(() => {}).finally(() => { beatBusy = false; });
+  }
+  function startHold(id, e){
+    if (e) e.preventDefault();
+    if (held || !rxChar || !armed) return;
+    held = id; $(id).classList.add('held');
+    if (navigator.vibrate) navigator.vibrate(30);
+    log('› ' + HOLDS[id].name + ': holding', true);
+    beat(); goTimer = setInterval(beat, 250);
+  }
+  function stopHold(){
+    if (!held) return;
+    const id = held;
+    held = null; clearInterval(goTimer); $(id).classList.remove('held');
+    if (rxChar) { const ch = rxChar; chain = chain.then(() => ch.writeValue(enc.encode('q\n'))).catch(() => {}); }
+    log('› ' + HOLDS[id].name + ': released', true);
+  }
+  function dropHold(){            // link lost: nothing to send, just reset the buttons
+    if (held) $(held).classList.remove('held');
+    held = null; clearInterval(goTimer);
+  }
+  function renderGo(mode){        // mode from the chair: 0 none, 1 slow drive, 2 boost
+    for (const id of Object.keys(HOLDS)) {
+      const h = HOLDS[id], b = $(id), driving = mode === h.mode;
+      b.disabled = !rxChar || !armed || (held && held !== id);
+      b.classList.toggle('driving', driving);
+      b.textContent = driving ? 'DRIVING — LET GO TO STOP' : h.idle;
+      $(id === 'go' ? 'gohint' : 'boosthint').textContent = !rxChar ? 'Not connected.'
+        : !armed ? 'Not armed — switch the ESC on.' : h.hint;
+    }
+    if (!armed && held) stopHold();
+  }
+  for (const id of Object.keys(HOLDS)) {
+    const b = $(id);
+    b.addEventListener('pointerdown', e => startHold(id, e));
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']) b.addEventListener(ev, () => { if (held === id) stopHold(); });
+    b.addEventListener('contextmenu', e => e.preventDefault());
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopHold(); });
+  window.addEventListener('blur', stopHold);
+
+  // ---------------------------------------------------------------- buttons
+  $('stop').addEventListener('click', () => { if (navigator.vibrate) navigator.vibrate(60); send('x'); });
+  $('save').addEventListener('click', () => { $('save').disabled = true; $('save').textContent = 'Saving…'; send('w'); });
+  // Lever range: two taps each, so a stray thumb cannot overwrite it.
+  // z = the lever is released now, l = the lever is fully squeezed now.
+  const RANGE = { setrest: { cmd:'z', idle:'Set RELEASED' }, setfull: { cmd:'l', idle:'Set SQUEEZED' } };
+  const rangeArmed = { setrest: 0, setfull: 0 };
+  for (const id of Object.keys(RANGE)) {
+    $(id).addEventListener('click', () => {
+      if (Date.now() - rangeArmed[id] > 4000) {
+        rangeArmed[id] = Date.now(); $(id).textContent = 'Tap again to save';
+        setTimeout(() => { if (rangeArmed[id]) { rangeArmed[id] = 0; $(id).textContent = RANGE[id].idle; } }, 4000);
+        return;
+      }
+      rangeArmed[id] = 0; $(id).textContent = RANGE[id].idle;
+      send(RANGE[id].cmd);
+    });
+  }
+
+  // ---------------------------------------------------------------- log
+  function log(msg, mine){
+    const el = $('log');
+    const line = document.createElement('div');
+    if (mine) line.className = 'me';
+    line.textContent = new Date().toTimeString().slice(0, 8) + '  ' + msg;
+    el.prepend(line);
+    while (el.childNodes.length > 60) el.lastChild.remove();
+  }
+
+  // ---------------------------------------------------------------- start
+  applyRanges(); setConnected(false);
+  if (!navigator.bluetooth) $('nobt').classList.add('show');
+  window.__eassist = { handleLine };   // for testing without a chair
+})();
+</script>
+</body>
+</html>
