@@ -75,6 +75,25 @@
   .ctl{display:flex;align-items:center;gap:10px;margin-top:6px}
   .ctl button{width:48px;height:48px;font-size:24px;font-weight:700;background:var(--bg);color:var(--ink);border:1.5px solid var(--line)}
   input[type=range]{flex:1;height:48px;accent-color:var(--accent);margin:0}
+  /* Only the round handle takes a touch. A swipe across the track scrolls the
+     page instead of changing the value, and a tap on the track does nothing. */
+  input[type=range]{pointer-events:none}
+  input[type=range]::-webkit-slider-thumb{pointer-events:auto}
+  input[type=range]::-moz-range-thumb{pointer-events:auto}
+
+  /* folded sections: closed by default, opened with the caret */
+  details.fold{margin-top:12px;border:1.5px solid var(--line);border-radius:16px}
+  details.fold > summary{list-style:none;display:flex;align-items:center;gap:10px;padding:16px 14px;
+    font-size:16px;font-weight:700;user-select:none;-webkit-user-select:none}
+  details.fold > summary::-webkit-details-marker{display:none}
+  details.fold > summary::before{content:'';flex:0 0 auto;width:9px;height:9px;margin:0 4px 0 2px;
+    border-right:2.5px solid var(--muted);border-bottom:2.5px solid var(--muted);transform:rotate(-45deg);transition:transform .15s}
+  details.fold[open] > summary::before{transform:rotate(45deg)}
+  details.fold > summary small{margin-left:auto;font-size:13px;font-weight:600;color:var(--muted)}
+  details.fold.dirty{border-color:var(--pending)}
+  details.fold.dirty > summary small{color:var(--pending)}
+  .foldbody{padding:0 12px 2px}
+  .foldbody > h2:first-child{margin-top:6px}
   .range{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:0 58px}
 
   .gobtn{display:block;width:100%;height:96px;font-size:22px;font-weight:900;letter-spacing:.08em;color:#fff;
@@ -136,39 +155,51 @@
   <div class="levernote" id="levernote"></div>
   <div class="stalenote" id="stalenote">No live data — readings are old.</div>
 
-  <h2>Lever range</h2>
-  <div class="card">
-    <div class="tools">
-      <button id="setrest" class="btn ghost">Set RELEASED</button>
-      <button id="setfull" class="btn ghost">Set SQUEEZED</button>
+  <!-- Everything below is folded away and starts closed, so the main screen is
+       readings + STOP only. Nothing on the main screen changes a setting. -->
+  <details class="fold" id="folddrive" style="display:none">
+    <summary>Drive from the phone<small>hold buttons</small></summary>
+    <div class="foldbody">
+      <div class="card" id="boostcard" style="display:none">
+        <button id="boost" class="gobtn boostbtn" disabled>HOLD TO BOOST</button>
+        <div class="hint" id="boosthint">Hold for a steady push at walking pace. Let go to stop.</div>
+      </div>
+      <div class="card">
+        <button id="go" class="gobtn" disabled>HOLD TO CREEP</button>
+        <div class="hint" id="gohint">Hold to creep forward. Let go to stop. Works only while armed.</div>
+      </div>
     </div>
-    <div class="hint" id="rangestate"></div>
-    <div class="hint" id="rangehint">ESC switch off first. Let go of the lever and tap Set RELEASED. Then squeeze it fully, hold, and tap Set SQUEEZED. Each is saved on the chair at once.</div>
-  </div>
+  </details>
 
-  <div id="creepsec" style="display:none">
-    <h2>Drive from the phone</h2>
-    <div class="card" id="boostcard" style="display:none">
-      <button id="boost" class="gobtn boostbtn" disabled>HOLD TO BOOST</button>
-      <div class="hint" id="boosthint">Hold for a steady push at walking pace. Let go to stop.</div>
+  <details class="fold" id="foldsettings">
+    <summary>Settings<small id="settingsnote">lever range · tuning</small></summary>
+    <div class="foldbody">
+      <h2>Lever range</h2>
+      <div class="card">
+        <div class="tools">
+          <button id="setrest" class="btn ghost">Set RELEASED</button>
+          <button id="setfull" class="btn ghost">Set SQUEEZED</button>
+        </div>
+        <div class="hint" id="rangestate"></div>
+        <div class="hint" id="rangehint">ESC switch off first. Let go of the lever and tap Set RELEASED. Then squeeze it fully, hold, and tap Set SQUEEZED. Each is saved on the chair at once.</div>
+      </div>
+
+      <h2>Tuning</h2>
+      <div class="hint" style="margin:-2px 2px 10px">Sliders move only by their round handle, or with − and +. Swiping across one does nothing.</div>
+      <div id="tunables"></div>
+      <div class="card savecard">
+        <button id="save" class="btn">Save as switch-on settings</button>
+        <div class="hint" id="savehint">Changes work immediately. Save makes them the settings the chair starts with.</div>
+      </div>
     </div>
-    <div id="boosthost"></div>
-    <div class="card">
-      <button id="go" class="gobtn" disabled>HOLD TO CREEP</button>
-      <div class="hint" id="gohint">Hold to creep forward. Let go to stop. Works only while armed.</div>
+  </details>
+
+  <details class="fold" id="foldlog">
+    <summary>Messages<small>from the chair</small></summary>
+    <div class="foldbody">
+      <div class="card"><pre id="log"></pre></div>
     </div>
-    <div id="creephost"></div>
-  </div>
-
-  <h2>Tuning</h2>
-  <div id="tunables"></div>
-  <div class="card savecard">
-    <button id="save" class="btn">Save as switch-on settings</button>
-    <div class="hint" id="savehint">Changes work immediately. Save makes them the settings the chair starts with.</div>
-  </div>
-
-  <h2>Messages</h2>
-  <div class="card"><pre id="log"></pre></div>
+  </details>
 </main>
 
 <div class="stopbar"><button id="stop" disabled>STOP</button></div>
@@ -222,7 +253,7 @@
         <button aria-label="more">+</button>
       </div>
       <div class="range"><span class="lo"></span><span class="hi"></span></div>`;
-    (d.boost ? $('boosthost') : d.creep ? $('creephost') : host).appendChild(el);
+    host.appendChild(el);                // every slider lives in Settings; the drive section has buttons only
     const [minus, plus] = el.querySelectorAll('.ctl button');
     const r = el.querySelector('input');
     const u = ui[d.key] = { d, el, r, minus, plus, val: el.querySelector('.val'),
@@ -262,7 +293,7 @@
     for (const u of Object.values(ui)) {
       if (u.d.rev) u.el.style.display = P.hasRev ? '' : 'none';   // older firmware: no reverse
       if (u.d.lever) u.el.style.display = P.hasLever ? '' : 'none';
-      if (u.d.creep) $('creepsec').style.display = P.hasCreep ? '' : 'none';
+      if (u.d.creep) { u.el.style.display = P.hasCreep ? '' : 'none'; $('folddrive').style.display = P.hasCreep ? '' : 'none'; }
       if (u.d.boost) { u.el.style.display = P.hasBoost ? '' : 'none'; $('boostcard').style.display = P.hasBoost ? '' : 'none'; }
       const v = P[u.d.key];
       if (v == null) continue;
@@ -272,6 +303,10 @@
     }
     renderSave();
     renderRange();
+    // With Settings folded shut, its header still says when something is unsaved.
+    const dirty = !!P.unsaved && !!P.canSave;
+    $('foldsettings').classList.toggle('dirty', dirty);
+    $('settingsnote').textContent = dirty ? 'unsaved changes' : 'lever range · tuning';
   }
 
   // ---------------------------------------------------------------- lever range
@@ -524,6 +559,7 @@
     for (const ev of ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']) b.addEventListener(ev, () => { if (held === id) stopHold(); });
     b.addEventListener('contextmenu', e => e.preventDefault());
   }
+  $('folddrive').addEventListener('toggle', () => { if (!$('folddrive').open) stopHold(); });   // folding it shut lets go
   document.addEventListener('visibilitychange', () => { if (document.hidden) stopHold(); });
   window.addEventListener('blur', stopHold);
 
